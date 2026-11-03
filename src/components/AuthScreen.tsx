@@ -9,11 +9,12 @@ import {
 } from 'lucide-react';
 import {
   loginWithEmail,
+  loginWithCustomToken,
   loginWithGoogle,
   registerWithEmail,
   resetPassword,
-  demoLoginCredentials,
 } from '../lib/firebase';
+import { backendErrorMessage, requestDemoToken } from '../lib/backend';
 import { useNavigate } from 'react-router-dom';
 import './AuthScreen.css';
 
@@ -100,7 +101,6 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
   const [action, setAction] = useState<AuthAction>(null);
   const actionLock = useRef(false);
   const firebaseReady = firebaseConfigState === 'configured';
-  const demoCredentials = demoLoginCredentials;
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -169,7 +169,6 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
   const handleDemoLogin = async () => {
     setError('');
     setNotice('');
-    if (!demoLoginCredentials) return;
     if (!firebaseReady) {
       setError('Configure Firebase before signing in to the demo workspace.');
       return;
@@ -179,11 +178,12 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
     actionLock.current = true;
     setAction('demo');
     try {
-      const user = await loginWithEmail(demoLoginCredentials.email, demoLoginCredentials.password);
+      const customToken = await requestDemoToken();
+      const user = await loginWithCustomToken(customToken);
       await user.getIdToken();
       navigate('/dashboard', { replace: true });
     } catch (signInError) {
-      setError(friendlyAuthError(signInError, 'login'));
+      setError(backendErrorMessage(signInError));
       actionLock.current = false;
       setAction(null);
     }
@@ -349,7 +349,7 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
           </button>
         </p>
 
-        {mode === 'login' && demoCredentials && (
+        {mode === 'login' && firebaseReady && (
           <button
             type="button"
             className="auth-demo-button"
@@ -357,7 +357,7 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
             disabled={Boolean(action) || !firebaseReady}
           >
             {action === 'demo' ? <LoaderCircle size={17} className="auth-spinner" /> : null}
-            {action === 'demo' ? 'Opening demo workspace…' : 'Explore demo workspace'}
+            {action === 'demo' ? 'Signing in to demo…' : 'Demo Login'}
           </button>
         )}
 

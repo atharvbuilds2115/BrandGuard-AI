@@ -12,6 +12,7 @@ from .routers.assets import router as assets_router
 from .routers.audits import router as audits_router
 from .routers.dashboard import router as dashboard_router
 from .routers.consistency import router as consistency_router
+from .routers.demo_auth import router as demo_auth_router
 from .routers.guidelines import router as guidelines_router
 from .routers.health import router as health_router
 from .routers.profile import router as profile_router
@@ -50,6 +51,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(demo_auth_router)
 app.include_router(dashboard_router)
 app.include_router(consistency_router)
 app.include_router(guidelines_router)

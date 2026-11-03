@@ -85,6 +85,56 @@ def _firebase_admin_app() -> firebase_admin.App:
                 ) from error
 
 
+def create_demo_custom_token() -> str:
+    demo_email = os.getenv('DEMO_ACCOUNT_EMAIL', '').strip()
+    if not demo_email:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Demo sign-in is not configured.',
+        )
+
+    try:
+        app = _firebase_admin_app()
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Demo sign-in is temporarily unavailable.',
+        ) from error
+
+    try:
+        user = firebase_auth.get_user_by_email(demo_email, app=app)
+    except firebase_auth.UserNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='The configured demo account could not be found.',
+        ) from error
+    except (FirebaseError, DefaultCredentialsError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Demo sign-in is temporarily unavailable.',
+        ) from error
+
+    if user.disabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='The configured demo account is disabled.',
+        )
+
+    try:
+        token = firebase_auth.create_custom_token(
+            user.uid,
+            developer_claims={'brandguard_demo': True},
+            app=app,
+        )
+    except (FirebaseError, DefaultCredentialsError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Demo sign-in is temporarily unavailable.',
+        ) from error
+
+    return token.decode('utf-8') if isinstance(token, bytes) else token
+
+
 def require_firebase_identity(
     authorization: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> FirebaseIdentity:

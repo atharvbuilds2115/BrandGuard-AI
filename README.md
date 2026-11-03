@@ -196,13 +196,9 @@ VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
 VITE_FIREBASE_PROJECT_ID=your-firebase-project-id
 VITE_FIREBASE_APP_ID=your-firebase-web-app-id
 VITE_API_BASE_URL=http://localhost:8000
-
-# Optional dedicated demo account; these values are public in the frontend bundle.
-VITE_DEMO_EMAIL=demo-account@example.invalid
-VITE_DEMO_PASSWORD=replace-with-a-dedicated-demo-account-password
 ```
 
-Firebase Web configuration is public client configuration. A demo password, if configured, is public by design and must belong to a dedicated low-privilege account. Never place backend API keys, Firebase Admin credentials, or service-account JSON in a `VITE_*` setting.
+Firebase Web configuration is public client configuration. Never place passwords, backend API keys, Firebase Admin credentials, or service-account JSON in a `VITE_*` setting. Demo sign-in uses a server-issued Firebase custom token and the backend-only `DEMO_ACCOUNT_EMAIL` setting.
 
 ### Backend environment (`backend/.env`)
 
@@ -226,7 +222,7 @@ FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 DEMO_ACCOUNT_EMAIL=demo-account@example.invalid
 ```
 
-For local development, Firebase Admin can use Application Default Credentials or a service-account JSON stored **outside the repository**. Set `FIREBASE_PROJECT_ID` to the same Firebase project used by the web app. `DEMO_ACCOUNT_EMAIL` is optional and only enables the separately labeled evaluator data path for that account. `GEMINI_API_KEY` and `GROQ_API_KEY` must remain in the backend environment; choose provider model IDs supported by the associated API account.
+For local development, Firebase Admin can use Application Default Credentials or a service-account JSON stored **outside the repository**. Set `FIREBASE_PROJECT_ID` to the same Firebase project used by the web app. `DEMO_ACCOUNT_EMAIL` is optional; when configured, it enables demo sign-in for that Firebase account and the separately labeled evaluator sample data. `GEMINI_API_KEY` and `GROQ_API_KEY` must remain in the backend environment; choose provider model IDs supported by the associated API account.
 
 ## Start the application
 

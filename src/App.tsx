@@ -86,7 +86,7 @@ import {
   updateWorkspaceSettings,
   mapApiGuideline,
 } from './lib/workspace';
-import { demoLoginCredentials, firebaseConfigState, firebaseConfigured, listenToAuthState, logout } from './lib/firebase';
+import { firebaseConfigState, firebaseConfigured, listenToAuthState, logout } from './lib/firebase';
 import type {
   ActivityEvent,
   Approval,
@@ -200,17 +200,13 @@ function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(firebaseConfigured);
   const [authError, setAuthError] = useState('');
+  const [isEvaluatorDemo, setIsEvaluatorDemo] = useState(false);
   const [workspaceRole, setWorkspaceRole] = useState<ApiWorkspace['role']>(firebaseConfigured ? 'member' : 'owner');
   const [loadedWorkspaceKey, setLoadedWorkspaceKey] = useState<string | null>(null);
   const [cloudLoadError, setCloudLoadError] = useState<{ key: string; message: string } | null>(null);
   const [cloudReloadKey, setCloudReloadKey] = useState(0);
   const approvalSubmissionIds = useRef(new Set<string>());
   const [assetLoadError, setAssetLoadError] = useState('');
-  const isEvaluatorDemo = Boolean(
-    authUser?.email &&
-    demoLoginCredentials?.email &&
-    authUser.email.toLowerCase() === demoLoginCredentials.email.toLowerCase(),
-  );
   const activeWorkspaceKey = authUser
     ? `${authUser.uid}:${authUser.metadata.lastSignInTime ?? ''}:${cloudReloadKey}`
     : '';
@@ -230,6 +226,7 @@ function App() {
       const unsubscribe = listenToAuthState(
         (user) => {
           setWorkspaceRole('member');
+          setIsEvaluatorDemo(false);
           setAuthUser(user);
           setAuthLoading(false);
           setAuthError('');
@@ -255,6 +252,25 @@ function App() {
       };
     }
   }, []);
+
+  useEffect(() => {
+    if (!authUser) return;
+    let active = true;
+    void authUser.getIdTokenResult().then(({ claims }) => {
+      if (active) setIsEvaluatorDemo(claims.brandguard_demo === true);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setIsEvaluatorDemo(false);
+      setToast({
+        kind: 'error',
+        message: `Demo account status could not be verified: ${backendErrorMessage(error)}`,
+      });
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [authUser]);
 
   useEffect(() => {
     if (!firebaseConfigured || !authUser || demoMode) {

@@ -7,6 +7,7 @@ import {
   onAuthStateChanged,
   sendPasswordResetEmail,
   setPersistence,
+  signInWithCustomToken,
   signInWithPopup,
   signInWithEmailAndPassword,
   signOut,
@@ -26,12 +27,6 @@ const configuredValues = configValues.filter((value) => Boolean(value?.trim())).
 export const firebaseConfigState =
   configuredValues === 0 ? 'missing' : configuredValues === configValues.length ? 'configured' : 'partial';
 export const firebaseConfigured = firebaseConfigState === 'configured';
-
-const demoEmail = import.meta.env.VITE_DEMO_EMAIL?.trim() ?? '';
-const demoPassword = import.meta.env.VITE_DEMO_PASSWORD ?? '';
-
-export const demoLoginCredentials =
-  demoEmail && demoPassword ? { email: demoEmail, password: demoPassword } : null;
 
 const firebaseApp = firebaseConfigured
   ? getApps().find((app) => app.name === '[DEFAULT]') ??
@@ -61,6 +56,14 @@ export async function loginWithEmail(email: string, password: string): Promise<U
   const firebaseAuth = requireAuth();
   await setPersistence(firebaseAuth, browserLocalPersistence);
   const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
+  return credential.user;
+}
+
+export async function loginWithCustomToken(customToken: string): Promise<User> {
+  if (!customToken.trim()) throw new Error('The server did not return a valid sign-in token.');
+  const firebaseAuth = requireAuth();
+  await setPersistence(firebaseAuth, browserLocalPersistence);
+  const credential = await signInWithCustomToken(firebaseAuth, customToken);
   return credential.user;
 }
 

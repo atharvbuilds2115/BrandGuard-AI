@@ -357,6 +357,48 @@ export async function backendRequest<T>(path: string, init?: RequestInit): Promi
   return result as T;
 }
 
+export async function publicBackendRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+  const url = backendUrl(path);
+
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, headers });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    throw new Error(`The BrandGuard API is unavailable at ${apiBaseUrl}. Start the FastAPI backend and try again.`);
+  }
+
+  const text = await response.text();
+  let result: unknown;
+  try {
+    result = text ? JSON.parse(text) : undefined;
+  } catch {
+    if (!response.ok) throw new Error(`The API request failed with status ${response.status}.`);
+    throw new Error('The API returned an invalid response.');
+  }
+
+  if (!response.ok) {
+    const detail =
+      typeof result === 'object' && result !== null && 'detail' in result && typeof result.detail === 'string'
+        ? result.detail
+        : `The API request failed with status ${response.status}.`;
+    throw new Error(detail);
+  }
+  return result as T;
+}
+
+export async function requestDemoToken(): Promise<string> {
+  const response = await publicBackendRequest<{ custom_token: string }>('/api/auth/demo-token', {
+    method: 'POST',
+  });
+  if (typeof response?.custom_token !== 'string' || !response.custom_token) {
+    throw new Error('The API returned an invalid demo sign-in token.');
+  }
+  return response.custom_token;
+}
+
 export function backendErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return 'The BrandGuard API request failed. Please try again.';
