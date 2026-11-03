@@ -5,26 +5,37 @@ from sqlalchemy.orm import Session
 
 from ..auth import require_firebase_user
 from ..database import get_db
-from ..models import ActivityEvent, Audit, AuditFinding
+from ..models import ActivityEvent, Approval, Audit, AuditFinding
 from ..schemas import AuditCreate, AuditOut
 from ..services.audit_service import run_audit_engine
+from ..services.gemini_service import GeminiAnalysisError
+from ..services.workspace_service import WorkspaceAccess
+from ..workspace_auth import require_workspace_access
 
-router = APIRouter(prefix='/api', tags=['audits'])
+router = APIRouter(prefix='/api', tags=['audits'], dependencies=[Depends(require_workspace_access)])
 
 
 @router.post('/audits', response_model=AuditOut, status_code=status.HTTP_201_CREATED)
 def create_audit(
     payload: AuditCreate,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    score, risk_category, findings = run_audit_engine(
-        payload.campaign_name,
-        payload.campaign_type,
-        payload.submitted_content,
-        db,
-        user_id,
-    )
+    try:
+        score, risk_category, findings, analysis_mode = run_audit_engine(
+            payload.campaign_name,
+            payload.campaign_type,
+            payload.submitted_content,
+            db,
+            user_id,
+            access.workspace_id,
+        )
+    except GeminiAnalysisError as error:
+        raise HTTPException(
+            status_code=error.http_status_code,
+            detail=str(error),
+        ) from error
 
     audit = Audit(
         campaign_name=payload.campaign_name,
@@ -33,10 +44,12 @@ def create_audit(
         risk_score=score,
         risk_category=risk_category,
         audit_status='completed',
+        analysis_mode=analysis_mode,
         user_id=user_id,
+        workspace_id=access.workspace_id,
     )
     db.add(audit)
-    db.commit(); db.refresh(audit)
+    db.flush()
 
     for finding in findings:
         record = AuditFinding(
@@ -49,27 +62,40 @@ def create_audit(
             suggested_correction=finding['suggestion'],
             finding_status=finding['status'],
             user_id=user_id,
+            workspace_id=access.workspace_id,
         )
         db.add(record)
 
+    review_approval = Approval(
+        audit_id=audit.id,
+        decision='pending',
+        reviewer='BrandGuard review',
+        user_id=user_id,
+        workspace_id=access.workspace_id,
+    )
+    db.add(review_approval)
     db.add(ActivityEvent(
         event_type='Campaign audit completed',
         description=f'Audit completed for {payload.campaign_name}',
         related_entity_id=str(audit.id),
         user_id=user_id,
+        workspace_id=access.workspace_id,
     ))
-    db.commit(); db.refresh(audit)
-    return audit
+    db.commit()
+    db.refresh(audit)
+    response = AuditOut.model_validate(audit).model_dump()
+    response['approval_id'] = review_approval.id
+    return response
 
 
 @router.get('/audits', response_model=list[AuditOut])
 def list_audits(
-    user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
     risk_category: str | None = Query(default=None),
     status: str | None = Query(default=None),
 ):
-    query = db.query(Audit).filter(Audit.user_id == user_id)
+    query = db.query(Audit).filter(Audit.workspace_id == access.workspace_id)
     if risk_category:
         query = query.filter(Audit.risk_category.ilike(risk_category))
     if status:
@@ -80,10 +106,10 @@ def list_audits(
 @router.get('/audits/{audit_id}', response_model=AuditOut)
 def get_audit(
     audit_id: int,
-    user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.workspace_id == access.workspace_id).first()
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
     return audit
@@ -93,22 +119,34 @@ def get_audit(
 def rerun_audit(
     audit_id: int,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+    audit = db.query(Audit).filter(
+        Audit.id == audit_id,
+        Audit.workspace_id == access.workspace_id,
+    ).first()
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
 
-    score, risk_category, findings = run_audit_engine(
-        audit.campaign_name,
-        audit.campaign_type,
-        audit.submitted_content,
-        db,
-        user_id,
-    )
+    try:
+        score, risk_category, findings, analysis_mode = run_audit_engine(
+            audit.campaign_name,
+            audit.campaign_type,
+            audit.submitted_content,
+            db,
+            user_id,
+            access.workspace_id,
+        )
+    except GeminiAnalysisError as error:
+        raise HTTPException(
+            status_code=error.http_status_code,
+            detail=str(error),
+        ) from error
     audit.risk_score = score
     audit.risk_category = risk_category
     audit.audit_status = 'completed'
+    audit.analysis_mode = analysis_mode
 
     for record in audit.findings:
         db.delete(record)
@@ -124,6 +162,7 @@ def rerun_audit(
             suggested_correction=finding['suggestion'],
             finding_status=finding['status'],
             user_id=user_id,
+            workspace_id=access.workspace_id,
         ))
 
     db.add(ActivityEvent(
@@ -131,6 +170,7 @@ def rerun_audit(
         description=f'Audit rerun for {audit.campaign_name}',
         related_entity_id=str(audit.id),
         user_id=user_id,
+        workspace_id=access.workspace_id,
     ))
     db.commit(); db.refresh(audit)
     return audit
@@ -142,16 +182,20 @@ def update_finding_status(
     finding_id: int,
     status_value: str,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+    audit = db.query(Audit).filter(
+        Audit.id == audit_id,
+        Audit.workspace_id == access.workspace_id,
+    ).first()
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
 
     finding = db.query(AuditFinding).filter(
         AuditFinding.id == finding_id,
         AuditFinding.audit_id == audit_id,
-        AuditFinding.user_id == user_id,
+        AuditFinding.workspace_id == access.workspace_id,
     ).first()
     if not finding:
         raise HTTPException(status_code=404, detail='Finding not found')
@@ -162,6 +206,7 @@ def update_finding_status(
         description=f'Finding status updated to {status_value}',
         related_entity_id=str(finding.id),
         user_id=user_id,
+        workspace_id=access.workspace_id,
     ))
     db.commit(); db.refresh(audit)
     return audit

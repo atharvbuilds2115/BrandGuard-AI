@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Dispatch, FormEvent, ReactNode, SetStateAction } from 'react';
-import { BrowserRouter, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import type { Dispatch, FormEvent, KeyboardEvent, ReactNode, SetStateAction } from 'react';
+import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import type { User } from 'firebase/auth';
 import {
   Area,
@@ -15,10 +15,12 @@ import {
   AlertTriangle,
   ArrowRight,
   Bell,
+  BarChart3,
   Check,
   CheckCheck,
   ChevronDown,
   CircleAlert,
+  Clock3,
   Copy,
   FileImage,
   FileText,
@@ -27,6 +29,7 @@ import {
   History,
   LayoutDashboard,
   ListFilter,
+  LoaderCircle,
   LogOut,
   Menu,
   PenSquare,
@@ -38,35 +41,57 @@ import {
   Tag,
   Trash2,
   Upload,
+  Video,
   X,
 } from 'lucide-react';
 import { defaultSettings, demoActivity, demoApprovals, demoAssets, demoGuidelines } from './data/demoData';
 import { runDemoAudit } from './lib/auditEngine';
 import { STORAGE_KEYS, clearStorageKey, safeReadStorage, writeStorage } from './lib/storage';
 import AuthScreen from './components/AuthScreen';
+import ConsistencyDashboard from './components/ConsistencyDashboard';
+import GuidelineImportSection from './components/GuidelineImportSection';
 import {
+  acceptWorkspaceInvitation,
+  backendErrorMessage,
   deleteAssetFromBackend,
   listAssetsFromBackend,
+  createWorkspace,
+  inviteWorkspaceMember,
+  getStoredWorkspaceId,
+  listWorkspaceData,
+  listWorkspaceMembers,
+  setActiveWorkspaceId,
+  searchWorkspace,
   updateAssetInBackend,
   uploadAssetToBackend,
+  listVideoReviews,
+  uploadVideoForReview,
+  type ApiGlobalSearchResult,
+  type ApiGuideline,
+  type ApiWorkspace,
+  type ApiWorkspaceInvitation,
+  type ApiWorkspaceMember,
+  type ApiVideoReview,
 } from './lib/backend';
 import {
-  cloudErrorMessage,
+  createAudit,
   loadWorkspace,
-  removeAsset,
+  loadWorkspaceActivity,
+  listWorkspaceApprovals,
   removeGuideline,
   saveActivity,
   saveApproval,
-  saveAudit,
-  saveAuditSubmission,
   saveGuideline,
-  saveSettings,
-} from './lib/firestore';
-import { firebaseConfigState, firebaseConfigured, listenToAuthState, logout } from './lib/firebase';
+  updateFindingStatus,
+  updateWorkspaceSettings,
+  mapApiGuideline,
+} from './lib/workspace';
+import { demoLoginCredentials, firebaseConfigState, firebaseConfigured, listenToAuthState, logout } from './lib/firebase';
 import type {
   ActivityEvent,
   Approval,
   Asset,
+  AuditSubmission,
   AuditResult,
   BrandGuideline,
   WorkspaceSettings,
@@ -77,20 +102,18 @@ type ToastState = {
   message: string;
 };
 
+type GlobalSearchItem = {
+  category: ApiGlobalSearchResult['category'];
+  id: string;
+  name: string;
+  description: string;
+  searchText?: string;
+};
+
 type ReviewFormState = {
   name: string;
   type: 'Social Media' | 'Website' | 'Email' | 'Advertisement';
   copy: string;
-};
-
-type DemoPreviousState = {
-  assets: Asset[];
-  guidelines: BrandGuideline[];
-  approvals: Approval[];
-  activity: ActivityEvent[];
-  settings: WorkspaceSettings;
-  auditResult: AuditResult | null;
-  audits: AuditResult[];
 };
 
 const navItems = [
@@ -98,6 +121,8 @@ const navItems = [
   { label: 'Asset Library', path: '/assets', Icon: FolderOpen },
   { label: 'Brand Guidelines', path: '/guidelines', Icon: ShieldCheck },
   { label: 'Campaign Review', path: '/reviews', Icon: Sparkles },
+  { label: 'Video Review', path: '/video-review', Icon: Video },
+  { label: 'Consistency Intelligence', path: '/consistency', Icon: BarChart3 },
   { label: 'Approvals', path: '/approvals', Icon: CheckCheck },
   { label: 'Activity History', path: '/activity', Icon: History },
   { label: 'Settings', path: '/settings', Icon: Settings },
@@ -157,13 +182,13 @@ const statusStyles: Record<string, string> = {
   approved: 'bg-emerald-100 text-emerald-700',
   rejected: 'bg-red-100 text-red-700',
   pending: 'bg-amber-100 text-amber-700',
+  changes_requested: 'bg-violet-100 text-violet-700',
   updated: 'bg-sky-100 text-sky-700',
   completed: 'bg-emerald-100 text-emerald-700',
 };
 
 function App() {
-  const [demoMode, setDemoMode] = useState(false);
-  const demoPreviousState = useRef<DemoPreviousState | null>(null);
+  const [demoMode] = useState(false);
   const [assets, setAssets] = useState<Asset[]>(() => safeReadStorage(STORAGE_KEYS.assets, demoAssets));
   const [guidelines, setGuidelines] = useState<BrandGuideline[]>(() => safeReadStorage(STORAGE_KEYS.guidelines, demoGuidelines));
   const [approvals, setApprovals] = useState<Approval[]>(() => safeReadStorage(STORAGE_KEYS.approvals, demoApprovals));
@@ -175,17 +200,36 @@ function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(firebaseConfigured);
   const [authError, setAuthError] = useState('');
-  const [loadedUid, setLoadedUid] = useState<string | null>(null);
-  const [cloudLoading, setCloudLoading] = useState(false);
-  const [cloudLoadError, setCloudLoadError] = useState('');
+  const [workspaceRole, setWorkspaceRole] = useState<ApiWorkspace['role']>(firebaseConfigured ? 'member' : 'owner');
+  const [loadedWorkspaceKey, setLoadedWorkspaceKey] = useState<string | null>(null);
+  const [cloudLoadError, setCloudLoadError] = useState<{ key: string; message: string } | null>(null);
   const [cloudReloadKey, setCloudReloadKey] = useState(0);
+  const approvalSubmissionIds = useRef(new Set<string>());
   const [assetLoadError, setAssetLoadError] = useState('');
+  const isEvaluatorDemo = Boolean(
+    authUser?.email &&
+    demoLoginCredentials?.email &&
+    authUser.email.toLowerCase() === demoLoginCredentials.email.toLowerCase(),
+  );
+  const activeWorkspaceKey = authUser
+    ? `${authUser.uid}:${authUser.metadata.lastSignInTime ?? ''}:${cloudReloadKey}`
+    : '';
+  const currentCloudLoadError =
+    cloudLoadError?.key === activeWorkspaceKey ? cloudLoadError.message : '';
+  const cloudLoading =
+    firebaseConfigured &&
+    !demoMode &&
+    Boolean(authUser) &&
+    loadedWorkspaceKey !== activeWorkspaceKey &&
+    !currentCloudLoadError;
 
   useEffect(() => {
     if (!firebaseConfigured) return;
+    let active = true;
     try {
-      return listenToAuthState(
+      const unsubscribe = listenToAuthState(
         (user) => {
+          setWorkspaceRole('member');
           setAuthUser(user);
           setAuthLoading(false);
           setAuthError('');
@@ -195,30 +239,36 @@ function App() {
           setAuthLoading(false);
         },
       );
+      return () => {
+        active = false;
+        unsubscribe();
+      };
     } catch (error) {
-      setAuthError(cloudErrorMessage(error));
-      setAuthLoading(false);
-      return undefined;
+      const message = backendErrorMessage(error);
+      queueMicrotask(() => {
+        if (!active) return;
+        setAuthError(message);
+        setAuthLoading(false);
+      });
+      return () => {
+        active = false;
+      };
     }
   }, []);
 
   useEffect(() => {
     if (!firebaseConfigured || !authUser || demoMode) {
-      setLoadedUid(null);
-      setCloudLoading(false);
       return;
     }
     let active = true;
-    setCloudLoading(true);
-    setCloudLoadError('');
-    void loadWorkspace(authUser).then(async (workspace) => {
+    void loadWorkspace().then(async (workspace) => {
       if (!active) return;
       let workspaceAssets: Asset[] = [];
       try {
         workspaceAssets = await listAssetsFromBackend();
         if (active) setAssetLoadError('');
       } catch (error) {
-        if (active) setAssetLoadError(`Backend asset service unavailable: ${cloudErrorMessage(error)}`);
+        if (active) setAssetLoadError(`Backend asset service unavailable: ${backendErrorMessage(error)}`);
       }
       if (!active) return;
       setAssets(workspaceAssets);
@@ -228,17 +278,19 @@ function App() {
       setSettings(workspace.settings);
       setAudits(workspace.audits);
       setAuditResult(workspace.audits[0] ?? null);
-      setLoadedUid(authUser.uid);
-      setCloudLoading(false);
+      setWorkspaceRole(workspace.workspaceRole);
+      setLoadedWorkspaceKey(activeWorkspaceKey);
     }).catch((error: unknown) => {
       if (!active) return;
-      setCloudLoadError(cloudErrorMessage(error));
-      setCloudLoading(false);
+      setCloudLoadError({
+        key: activeWorkspaceKey,
+        message: backendErrorMessage(error),
+      });
     });
     return () => {
       active = false;
     };
-  }, [authUser, cloudReloadKey, demoMode]);
+  }, [activeWorkspaceKey, authUser, cloudReloadKey, demoMode]);
 
   useEffect(() => {
     if (firebaseConfigured || demoMode) return;
@@ -277,40 +329,46 @@ function App() {
   }, [toast]);
 
   const addActivity = (item: Omit<ActivityEvent, 'id' | 'timestamp'>) => {
+    if (firebaseConfigured && authUser && !demoMode) {
+      void saveActivity(item).then((event) => {
+        setActivity((current) => [event, ...current]);
+      }).catch((error: unknown) => {
+        setToast({ kind: 'error', message: `Activity could not be saved: ${backendErrorMessage(error)}` });
+      });
+      return;
+    }
     const event: ActivityEvent = {
       ...item,
       id: `event-${Date.now()}-${crypto.randomUUID()}`,
       timestamp: new Date().toISOString(),
     };
     setActivity((current) => [event, ...current]);
-    if (firebaseConfigured && authUser && !demoMode) {
-      void saveActivity(authUser.uid, event).catch((error: unknown) => {
-        setToast({ kind: 'error', message: `Activity could not be saved: ${cloudErrorMessage(error)}` });
-      });
-    }
   };
 
   const handleGuidelineSave = async (next: BrandGuideline) => {
-    if (firebaseConfigured && authUser && !demoMode) await saveGuideline(authUser.uid, next);
+    const saved = firebaseConfigured && authUser && !demoMode ? await saveGuideline(next) : next;
     setGuidelines((current) => {
       const existing = current.some((item) => item.id === next.id);
       if (existing) {
-        return current.map((item) => (item.id === next.id ? next : item));
+        return current.map((item) => (item.id === next.id ? saved : item));
       }
-      return [next, ...current];
+      return [saved, ...current];
     });
     addActivity({
       type: 'Brand guideline updated',
-      title: next.title,
+      title: saved.title,
       status: 'Updated',
       campaignName: 'Brand Guidelines',
     });
-    setToast({ kind: 'success', message: demoMode ? 'Demo guideline updated in memory only; it will not be saved.' : 'Brand guideline saved to Firestore.' });
+    setToast({
+      kind: 'success',
+      message: demoMode ? 'Demo guideline updated in memory only; it will not be saved.' : 'Brand guideline saved.',
+    });
   };
 
   const handleGuidelineDelete = async (id: string) => {
     const target = guidelines.find((item) => item.id === id);
-    if (firebaseConfigured && authUser && !demoMode) await removeGuideline(authUser.uid, id);
+    if (firebaseConfigured && authUser && !demoMode) await removeGuideline(id);
     setGuidelines((current) => current.filter((item) => item.id !== id));
     if (target) {
       addActivity({
@@ -323,35 +381,72 @@ function App() {
     setToast({ kind: 'success', message: demoMode ? 'Demo guideline removed in memory only; it will not be saved.' : 'Guideline removed.' });
   };
 
-  const handleApprovalUpdate = async (id: string, status: Approval['status'], comment?: string) => {
-    const approval = approvals.find((item) => item.id === id);
-    if (!approval) return;
-    const updatedApproval = { ...approval, status, comment: comment ?? approval.comment };
-    try {
-      if (firebaseConfigured && authUser && !demoMode) await saveApproval(authUser.uid, updatedApproval);
-    } catch (error) {
-      setToast({ kind: 'error', message: `Approval could not be saved: ${cloudErrorMessage(error)}` });
-      return;
-    }
-    setApprovals((current) =>
-      current.map((item) =>
-        item.id === id
-          ? updatedApproval
-          : item,
-      ),
-    );
-
-    addActivity({
-      type: status === 'approved' ? 'Campaign approved' : status === 'rejected' ? 'Campaign rejected' : 'Approval updated',
-      title: approval.campaignName,
-      status: status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Review pending',
-      campaignName: approval.campaignName,
-    });
-
+  const handleGuidelinesImported = async (imported: ApiGuideline[], filename: string) => {
+    const mapped = imported.map(mapApiGuideline);
+    setGuidelines((current) => [...mapped, ...current]);
     setToast({
       kind: 'success',
-      message: status === 'approved' ? 'Campaign approved.' : status === 'rejected' ? 'Campaign rejected.' : 'Approval updated.',
+      message: `Saved ${mapped.length} approved rule${mapped.length === 1 ? '' : 's'} from ${filename}.`,
     });
+  };
+
+  const handleApprovalUpdate = async (id: string, status: Approval['status'], comment?: string): Promise<boolean> => {
+    const approval = approvals.find((item) => item.id === id);
+    if (!approval || approval.status !== 'pending' || approvalSubmissionIds.current.has(id)) return false;
+    approvalSubmissionIds.current.add(id);
+    const updatedApproval = { ...approval, status, comment: comment ?? approval.comment };
+    try {
+      if (firebaseConfigured && authUser && !demoMode) {
+        const savedApproval = await saveApproval(updatedApproval);
+        setApprovals((current) => current.map((item) => item.id === id ? savedApproval : item));
+        try {
+          setApprovals(await listWorkspaceApprovals());
+        } catch (error) {
+          setToast({
+            kind: 'error',
+            message: `Approval saved, but approvals could not be refreshed: ${backendErrorMessage(error)}`,
+          });
+          return true;
+        }
+      } else {
+        setApprovals((current) => current.map((item) => item.id === id ? updatedApproval : item));
+      }
+    } catch (error) {
+      setToast({ kind: 'error', message: `Approval could not be saved: ${backendErrorMessage(error)}` });
+      return false;
+    } finally {
+      approvalSubmissionIds.current.delete(id);
+    }
+
+    let activityRefreshError = '';
+    if (firebaseConfigured && authUser && !demoMode) {
+      try {
+        setActivity(await loadWorkspaceActivity());
+      } catch (error) {
+        activityRefreshError = backendErrorMessage(error);
+      }
+    }
+
+    if (demoMode) {
+      addActivity({
+        type: status === 'approved' ? 'Campaign approved' : status === 'rejected' ? 'Campaign rejected' : 'Approval updated',
+        title: approval.campaignName,
+        status: status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Review pending',
+        campaignName: approval.campaignName,
+      });
+    }
+
+    setToast({
+      kind: activityRefreshError ? 'error' : 'success',
+      message: activityRefreshError
+        ? `Approval saved, but activity could not be refreshed: ${activityRefreshError}`
+        : status === 'approved'
+          ? 'Campaign approved.'
+          : status === 'rejected'
+            ? 'Campaign rejected.'
+            : 'Changes requested.',
+    });
+    return true;
   };
 
   const handleAssetUpload = async (file: File) => {
@@ -368,7 +463,7 @@ function App() {
         });
         setToast({ kind: 'success', message: 'Asset uploaded securely and saved.' });
       } catch (error) {
-        setToast({ kind: 'error', message: `Upload failed: ${cloudErrorMessage(error)}` });
+        setToast({ kind: 'error', message: `Upload failed: ${backendErrorMessage(error)}` });
       }
       return;
     }
@@ -430,22 +525,30 @@ function App() {
     };
   }, [approvals, assets, audits, demoMode]);
 
-  const handleAuditComplete = async (next: AuditResult) => {
+  const handleAuditComplete = async (submission: AuditSubmission) => {
     if (firebaseConfigured && authUser && !demoMode) {
-      const approval: Approval = {
-        id: `approval-${next.id}`,
-        auditId: next.id,
-        campaignName: next.campaignName,
-        submittedBy: authUser.email ?? 'Workspace user',
-        submittedAt: next.createdAt,
-        riskLevel: next.riskLevel,
-        status: 'pending',
-        assetCount: 0,
+      const saved = await createAudit(submission, guidelines);
+      setApprovals((current) => [saved.approval, ...current]);
+      setAudits((current) => [saved.audit, ...current]);
+      setAuditResult(saved.audit);
+      try {
+        setActivity(await loadWorkspaceActivity());
+      } catch (error) {
+        setToast({ kind: 'error', message: `Audit saved, but activity could not be refreshed: ${backendErrorMessage(error)}` });
+      }
+      return;
+    }
+
+    if (demoMode) {
+      const next: AuditResult = {
+        ...runDemoAudit(
+          submission.campaignName,
+          submission.campaignType,
+          submission.submittedContent,
+          guidelines,
+        ),
+        submittedContent: submission.submittedContent,
       };
-      await saveAuditSubmission(authUser.uid, next, approval);
-      setApprovals((current) => [approval, ...current]);
-      setAudits((current) => [next, ...current]);
-    } else if (demoMode) {
       const approval: Approval = {
         id: `demo-approval-${next.id}`,
         auditId: next.id,
@@ -464,29 +567,37 @@ function App() {
         status: 'Sample',
         campaignName: next.campaignName,
       });
+      setAuditResult(next);
     }
-    setAuditResult(next);
   };
 
   const handleFindingStatusChange = async (findingId: string, status: AuditResult['findings'][number]['status']) => {
     if (!auditResult) return;
-    const updatedAudit = {
-      ...auditResult,
-      findings: auditResult.findings.map((finding) =>
-        finding.id === findingId ? { ...finding, status } : finding,
-      ),
-    };
-    if (firebaseConfigured && authUser && !demoMode) await saveAudit(authUser.uid, updatedAudit);
+    const updatedAudit = firebaseConfigured && authUser && !demoMode
+      ? await updateFindingStatus(auditResult.id, findingId, status, guidelines)
+      : {
+          ...auditResult,
+          findings: auditResult.findings.map((finding) =>
+            finding.id === findingId ? { ...finding, status } : finding,
+          ),
+        };
     setAuditResult(updatedAudit);
     setAudits((current) => current.map((audit) => audit.id === updatedAudit.id ? updatedAudit : audit));
+    if (firebaseConfigured && authUser && !demoMode) {
+      try {
+        setActivity(await loadWorkspaceActivity());
+      } catch (error) {
+        setToast({ kind: 'error', message: `Finding updated, but activity could not be refreshed: ${backendErrorMessage(error)}` });
+      }
+    }
   };
 
   const handleSettingsChange = async (next: WorkspaceSettings) => {
     if (firebaseConfigured && authUser && !demoMode) {
       try {
-        await saveSettings(authUser.uid, authUser, next);
+        await updateWorkspaceSettings(next);
       } catch (error) {
-        setToast({ kind: 'error', message: `Settings could not be saved: ${cloudErrorMessage(error)}` });
+        setToast({ kind: 'error', message: `Settings could not be saved: ${backendErrorMessage(error)}` });
         return;
       }
     }
@@ -497,40 +608,8 @@ function App() {
     try {
       await logout();
     } catch (error) {
-      setToast({ kind: 'error', message: `Sign out failed: ${cloudErrorMessage(error)}` });
+      setToast({ kind: 'error', message: `Sign out failed: ${backendErrorMessage(error)}` });
     }
-  };
-
-  const handleTryDemo = () => {
-    demoPreviousState.current = { assets, guidelines, approvals, activity, settings, auditResult, audits };
-    const sampleAudits = createDemoAuditHistory();
-    setAssets(demoAssets.map((item) => ({ ...item, tags: [...item.tags] })));
-    setGuidelines(demoGuidelines.map((item) => ({ ...item })));
-    setApprovals(demoApprovals.map((item) => ({ ...item })));
-    setActivity(demoActivity.map((item) => ({ ...item })));
-    setSettings({ ...defaultSettings });
-    setAudits(sampleAudits);
-    setAuditResult(sampleAudits[0]);
-    setAssetLoadError('');
-    setCloudLoadError('');
-    setToast(null);
-    setDemoMode(true);
-  };
-
-  const handleExitDemo = () => {
-    const previousState = demoPreviousState.current;
-    if (previousState) {
-      setAssets(previousState.assets);
-      setGuidelines(previousState.guidelines);
-      setApprovals(previousState.approvals);
-      setActivity(previousState.activity);
-      setSettings(previousState.settings);
-      setAuditResult(previousState.auditResult);
-      setAudits(previousState.audits);
-      demoPreviousState.current = null;
-    }
-    setDemoMode(false);
-    setToast(null);
   };
 
   const handleAssetStateChange: Dispatch<SetStateAction<Asset[]>> = (action) => {
@@ -539,15 +618,15 @@ function App() {
       const nextById = new Map(next.map((asset) => [asset.id, asset]));
       for (const asset of assets) {
         if (!nextById.has(asset.id)) {
-          void deleteAssetFromBackend(asset.id).then(() => removeAsset(authUser.uid, asset.id)).catch((error: unknown) => {
-            setToast({ kind: 'error', message: `Asset could not be removed: ${cloudErrorMessage(error)}` });
+          void deleteAssetFromBackend(asset.id).catch((error: unknown) => {
+            setToast({ kind: 'error', message: `Asset could not be removed: ${backendErrorMessage(error)}` });
           });
         }
       }
       for (const asset of next) {
         if (JSON.stringify(assets.find((item) => item.id === asset.id)) !== JSON.stringify(asset)) {
           void updateAssetInBackend(asset).catch((error: unknown) => {
-            setToast({ kind: 'error', message: `Asset metadata could not be saved: ${cloudErrorMessage(error)}` });
+            setToast({ kind: 'error', message: `Asset metadata could not be saved: ${backendErrorMessage(error)}` });
           });
         }
       }
@@ -556,7 +635,7 @@ function App() {
   };
 
   if (firebaseConfigState !== 'configured') {
-    if (!demoMode) return <AuthScreen firebaseConfigState={firebaseConfigState} onTryDemo={handleTryDemo} />;
+    if (!demoMode) return <AuthScreen firebaseConfigState={firebaseConfigState} />;
   }
   if (firebaseConfigured && authLoading) {
     return <LoadingScreen message="Checking your sign-in…" />;
@@ -565,58 +644,54 @@ function App() {
     return <ConfigurationNotice message={authError} />;
   }
   if (!authUser && !demoMode) {
-    return <AuthScreen firebaseConfigState={firebaseConfigState} onTryDemo={handleTryDemo} />;
+    return <AuthScreen firebaseConfigState={firebaseConfigState} />;
   }
   if (firebaseConfigured && !demoMode && cloudLoading) {
     return <LoadingScreen message="Loading your secure workspace…" />;
   }
-  if (firebaseConfigured && !demoMode && cloudLoadError) {
+  if (firebaseConfigured && !demoMode && currentCloudLoadError) {
     return (
       <ConfigurationNotice
-        message={`Unable to load your cloud workspace: ${cloudLoadError}`}
+        message={`Unable to load your cloud workspace: ${currentCloudLoadError}`}
         actionLabel="Retry"
-        onAction={() => {
-          setCloudLoadError('');
-          setCloudReloadKey((current) => current + 1);
-        }}
+        onAction={() => setCloudReloadKey((current) => current + 1)}
       />
     );
   }
-  if (firebaseConfigured && !demoMode && authUser && loadedUid !== authUser.uid) {
+  if (firebaseConfigured && !demoMode && authUser && loadedWorkspaceKey !== activeWorkspaceKey) {
     return <LoadingScreen message="Loading your secure workspace…" />;
   }
 
   return (
-    <BrowserRouter>
-      <AppRouter
-        assets={assets}
-        approvals={approvals}
-        activity={activity}
-        auditResult={auditResult}
-        dashboardStats={dashboardStats}
-        guidelines={guidelines}
-        settings={settings}
-        onApprovalUpdate={handleApprovalUpdate}
-        onAssetUpload={handleAssetUpload}
-        onGuidelineDelete={handleGuidelineDelete}
-        onGuidelineSave={handleGuidelineSave}
-        onAuditComplete={handleAuditComplete}
-        onResetDemo={resetDemoData}
-        onSettingsChange={handleSettingsChange}
-        toast={toast}
-        addActivity={addActivity}
-        setAssets={handleAssetStateChange}
-        audits={audits}
-        authUser={firebaseConfigured && !demoMode ? authUser : null}
-        onSignOut={firebaseConfigured && !demoMode ? () => void handleSignOut() : undefined}
-        demoMode={demoMode}
-        onExitDemo={demoMode ? handleExitDemo : undefined}
-        firebaseEnabled={firebaseConfigured && !demoMode}
-        onSelectAudit={setAuditResult}
-        onFindingStatusChange={handleFindingStatusChange}
-        assetLoadError={assetLoadError}
-      />
-    </BrowserRouter>
+    <AppRouter
+      assets={assets}
+      approvals={approvals}
+      activity={activity}
+      auditResult={auditResult}
+      dashboardStats={dashboardStats}
+      guidelines={guidelines}
+      settings={settings}
+      onApprovalUpdate={handleApprovalUpdate}
+      onAssetUpload={handleAssetUpload}
+      onGuidelineDelete={handleGuidelineDelete}
+      onGuidelineSave={handleGuidelineSave}
+      onGuidelinesImported={handleGuidelinesImported}
+      onAuditComplete={handleAuditComplete}
+      onResetDemo={resetDemoData}
+      onSettingsChange={handleSettingsChange}
+      toast={toast}
+      setAssets={handleAssetStateChange}
+      audits={audits}
+      authUser={firebaseConfigured && !demoMode ? authUser : null}
+      onSignOut={firebaseConfigured && !demoMode ? () => void handleSignOut() : undefined}
+      demoMode={demoMode}
+      isEvaluatorDemo={isEvaluatorDemo}
+      firebaseEnabled={firebaseConfigured && !demoMode}
+      workspaceRole={workspaceRole}
+      onSelectAudit={setAuditResult}
+      onFindingStatusChange={handleFindingStatusChange}
+      assetLoadError={assetLoadError}
+    />
   );
 }
 
@@ -632,18 +707,19 @@ function AppRouter({
   onAssetUpload,
   onGuidelineDelete,
   onGuidelineSave,
+  onGuidelinesImported,
   onAuditComplete,
   onResetDemo,
   onSettingsChange,
   toast,
-  addActivity,
   setAssets,
   audits,
   authUser,
   onSignOut,
   demoMode,
-  onExitDemo,
+  isEvaluatorDemo,
   firebaseEnabled,
+  workspaceRole,
   onSelectAudit,
   onFindingStatusChange,
   assetLoadError,
@@ -661,28 +737,82 @@ function AppRouter({
   };
   guidelines: BrandGuideline[];
   settings: WorkspaceSettings;
-  onApprovalUpdate: (id: string, status: Approval['status'], comment?: string) => void | Promise<void>;
+  onApprovalUpdate: (id: string, status: Approval['status'], comment?: string) => Promise<boolean>;
   onAssetUpload: (file: File) => void | Promise<void>;
   onGuidelineDelete: (id: string) => void | Promise<void>;
   onGuidelineSave: (next: BrandGuideline) => void | Promise<void>;
-  onAuditComplete: (next: AuditResult) => void | Promise<void>;
+  onGuidelinesImported: (guidelines: ApiGuideline[], filename: string) => Promise<void>;
+  onAuditComplete: (submission: AuditSubmission) => void | Promise<void>;
   onResetDemo: () => void;
   onSettingsChange: (next: WorkspaceSettings) => void | Promise<void>;
   toast: ToastState | null;
-  addActivity: (item: Omit<ActivityEvent, 'id' | 'timestamp'>) => void;
   setAssets: Dispatch<SetStateAction<Asset[]>>;
   audits: AuditResult[];
   authUser: User | null;
   onSignOut?: () => void;
   demoMode: boolean;
-  onExitDemo?: () => void;
+  isEvaluatorDemo: boolean;
   firebaseEnabled: boolean;
+  workspaceRole: ApiWorkspace['role'];
   onSelectAudit: (audit: AuditResult) => void;
   onFindingStatusChange: (findingId: string, status: AuditResult['findings'][number]['status']) => Promise<void>;
   assetLoadError: string;
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [selectedAssetSearchId, setSelectedAssetSearchId] = useState<string | null>(null);
+  const [selectedGuidelineSearchId, setSelectedGuidelineSearchId] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  const localSearchItems = useMemo<GlobalSearchItem[]>(() => [
+    ...audits.map((audit) => ({
+      category: 'Campaign' as const,
+      id: audit.id,
+      name: audit.campaignName,
+      description: `${audit.campaignType} campaign · ${audit.riskLevel} risk`,
+      searchText: audit.submittedContent ?? '',
+    })),
+    ...assets.map((asset) => ({
+      category: 'Asset' as const,
+      id: asset.id,
+      name: asset.title,
+      description: [asset.campaign, ...asset.tags].filter(Boolean).join(' · '),
+      searchText: `${asset.fileType} ${asset.campaign} ${asset.tags.join(' ')}`,
+    })),
+    ...guidelines.map((guideline) => ({
+      category: 'Guideline' as const,
+      id: guideline.id,
+      name: guideline.title,
+      description: guideline.description || guideline.category,
+      searchText: `${guideline.category} ${guideline.value}`,
+    })),
+  ], [assets, audits, guidelines]);
+
+  const selectSearchResult = (result: GlobalSearchItem) => {
+    setSearch('');
+    if (result.category === 'Campaign') {
+      setSelectedAssetSearchId(null);
+      setSelectedGuidelineSearchId(null);
+      const auditId = result.id.startsWith('audit-') || result.id.startsWith('demo-') ? result.id : `audit-${result.id}`;
+      const audit = audits.find((item) => item.id === auditId);
+      if (audit) {
+        onSelectAudit(audit);
+        navigate('/results');
+      }
+      return;
+    }
+
+    if (result.category === 'Asset') {
+      setSelectedGuidelineSearchId(null);
+      setSelectedAssetSearchId(result.id.startsWith('asset-') ? result.id : `asset-${result.id}`);
+      navigate('/assets');
+      return;
+    }
+
+    setSelectedAssetSearchId(null);
+    setSelectedGuidelineSearchId(result.id.startsWith('guideline-') ? result.id : `guideline-${result.id}`);
+    navigate('/guidelines');
+  };
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -742,19 +872,26 @@ function AppRouter({
           <TopBar
             search={search}
             setSearch={setSearch}
+            localSearchItems={localSearchItems}
+            firebaseEnabled={firebaseEnabled}
+            onSelectSearchResult={selectSearchResult}
             settings={settings}
             onSidebarToggle={() => setSidebarOpen((value) => !value)}
             userEmail={authUser?.email}
             onSignOut={onSignOut}
             demoMode={demoMode}
-            onExitDemo={onExitDemo}
+            isEvaluatorDemo={isEvaluatorDemo}
           />
           <main className="min-h-screen bg-slate-100 p-4 md:p-6">
-            {demoMode && (
+            {(demoMode || isEvaluatorDemo) && (
               <div role="status" className="mb-5 flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-950 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <p className="font-semibold">Demo workspace — sample data</p>
-                  <p className="mt-1 text-sm leading-5">Changes are temporary in this browser session and are not saved to Firebase or the backend.</p>
+                  <p className="font-semibold">Demonstration workspace — sample data</p>
+                  <p className="mt-1 text-sm leading-5">
+                    {isEvaluatorDemo
+                      ? 'Sample records are labeled as demonstrations and belong only to this dedicated Firebase account.'
+                      : 'Changes are temporary in this browser session and are not saved to Firebase or the backend.'}
+                  </p>
                 </div>
                 <span className="w-fit rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide">Demo mode</span>
               </div>
@@ -770,20 +907,29 @@ function AppRouter({
               />
               <Route
                 path="/assets"
-                element={<AssetsPage assets={assets} setAssets={setAssets} onAssetUpload={onAssetUpload} search={search} setSearch={setSearch} assetLoadError={assetLoadError} />}
+                element={<AssetsPage assets={assets} setAssets={setAssets} onAssetUpload={onAssetUpload} search={search} setSearch={setSearch} assetLoadError={assetLoadError} selectedAssetSearchId={selectedAssetSearchId} onAssetSelectionChange={setSelectedAssetSearchId} />}
               />
               <Route
                 path="/guidelines"
-                element={<GuidelinesPage guidelines={guidelines} onSave={onGuidelineSave} onDelete={onGuidelineDelete} />}
+                element={<GuidelinesPage guidelines={guidelines} firebaseEnabled={firebaseEnabled} canManageGuidelines={workspaceRole !== 'member'} onSave={onGuidelineSave} onDelete={onGuidelineDelete} onImportSaved={onGuidelinesImported} selectedSearchId={selectedGuidelineSearchId} />}
               />
               <Route
                 path="/reviews"
-                element={<CampaignReviewPage guidelines={guidelines} onAuditComplete={onAuditComplete} addActivity={addActivity} />}
+                element={<CampaignReviewPage isDemoMode={demoMode} onAuditComplete={onAuditComplete} />}
+              />
+              <Route
+                path="/video-review"
+                element={<VideoReviewPage firebaseEnabled={firebaseEnabled} />}
+              />
+              <Route
+                path="/consistency"
+                element={<ConsistencyDashboard firebaseEnabled={firebaseEnabled} />}
               />
               <Route
                 path="/results"
                 element={
                   <ReviewResultsPage
+                    isDemoMode={demoMode}
                     auditResult={auditResult}
                     audits={audits}
                     onSelectAudit={onSelectAudit}
@@ -836,24 +982,118 @@ function AppRouter({
 function TopBar({
   search,
   setSearch,
+  localSearchItems,
+  firebaseEnabled,
+  onSelectSearchResult,
   settings,
   onSidebarToggle,
   userEmail,
   onSignOut,
   demoMode,
-  onExitDemo,
+  isEvaluatorDemo,
 }: {
   search: string;
   setSearch: (value: string) => void;
+  localSearchItems: GlobalSearchItem[];
+  firebaseEnabled: boolean;
+  onSelectSearchResult: (result: GlobalSearchItem) => void;
   settings: WorkspaceSettings;
   onSidebarToggle: () => void;
   userEmail?: string | null;
   onSignOut?: () => void;
   demoMode: boolean;
-  onExitDemo?: () => void;
+  isEvaluatorDemo: boolean;
 }) {
+  const [results, setResults] = useState<GlobalSearchItem[]>([]);
+  const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [completedQuery, setCompletedQuery] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [activeResultIndex, setActiveResultIndex] = useState(-1);
+  const [retrySearch, setRetrySearch] = useState(0);
+  const [searchError, setSearchError] = useState('');
+  const searchContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const query = search.trim();
+    if (!query) return;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const runSearch = async () => {
+        try {
+          const matches = firebaseEnabled
+            ? (await searchWorkspace(query, controller.signal)).map((item) => ({
+                ...item,
+                id: String(item.id),
+              }))
+            : localSearchItems
+                .filter((item) => `${item.name} ${item.description} ${item.searchText ?? ''}`.toLowerCase().includes(query.toLowerCase()))
+                .slice(0, 15);
+          if (!controller.signal.aborted) {
+            setResults(matches);
+            setSearchState('ready');
+            setCompletedQuery(query);
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            setSearchError(backendErrorMessage(error));
+            setSearchState('error');
+            setCompletedQuery(query);
+          }
+        }
+      };
+      void runSearch();
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [firebaseEnabled, localSearchItems, retrySearch, search]);
+
+  useEffect(() => {
+    if (!isSearchOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && !searchContainerRef.current?.contains(event.target)) {
+        setIsSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    return () => document.removeEventListener('mousedown', closeOnOutsideClick);
+  }, [isSearchOpen]);
+
+  const selectResult = (result: GlobalSearchItem) => {
+    setIsSearchOpen(false);
+    setActiveResultIndex(-1);
+    onSelectSearchResult(result);
+  };
+
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      setIsSearchOpen(false);
+      return;
+    }
+    if (event.key === 'ArrowDown' && results.length) {
+      event.preventDefault();
+      setIsSearchOpen(true);
+      setActiveResultIndex((current) => (current + 1) % results.length);
+    } else if (event.key === 'ArrowUp' && results.length) {
+      event.preventDefault();
+      setIsSearchOpen(true);
+      setActiveResultIndex((current) => (current <= 0 ? results.length - 1 : current - 1));
+    } else if (event.key === 'Enter' && activeResultIndex >= 0) {
+      event.preventDefault();
+      selectResult(results[activeResultIndex]);
+    }
+  };
+  const currentSearchState = !search.trim()
+    ? 'idle'
+    : completedQuery !== search.trim()
+      ? 'loading'
+      : searchState;
+
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur-sm">
+    <header className={`sticky top-0 ${isSearchOpen ? 'z-[70]' : 'z-20'} border-b border-slate-200 bg-white/90 backdrop-blur-sm`}>
       <div className="flex items-center justify-between gap-4 px-4 py-3 md:px-6">
         <div className="flex items-center gap-3">
           <button type="button" className="rounded-lg border border-slate-200 p-2 md:hidden" aria-label="Toggle menu" onClick={onSidebarToggle}>
@@ -866,15 +1106,68 @@ function TopBar({
         </div>
 
         <div className="flex flex-1 items-center justify-end gap-3">
-          <label className="relative hidden w-full max-w-md md:block">
+          <div ref={searchContainerRef} className="relative hidden w-full max-w-md md:block">
             <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
             <input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setIsSearchOpen(true);
+                setActiveResultIndex(-1);
+              }}
+              onFocus={() => {
+                if (search.trim()) setIsSearchOpen(true);
+              }}
+              onKeyDown={handleSearchKeyDown}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={isSearchOpen && Boolean(search.trim())}
+              aria-controls="global-search-results"
+              aria-activedescendant={activeResultIndex >= 0 ? `global-search-result-${activeResultIndex}` : undefined}
               placeholder="Search campaigns, assets, and guidelines"
               className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-sm text-slate-700 outline-none transition focus:border-blue-300 focus:bg-white"
             />
-          </label>
+            {isSearchOpen && search.trim() && (
+              <div id="global-search-results" role="listbox" className="absolute left-0 right-0 top-full z-50 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                {currentSearchState === 'loading' && (
+                  <div role="status" className="flex items-center gap-2 px-3 py-3 text-sm text-slate-500">
+                    <LoaderCircle size={16} className="animate-spin" /> Searching…
+                  </div>
+                )}
+                {currentSearchState === 'error' && (
+                  <div className="px-3 py-3 text-sm text-red-700">
+                    <p role="alert">Search failed. {searchError}</p>
+                    <button type="button" className="mt-2 font-medium text-blue-700 hover:text-blue-800" onClick={() => {
+                      setSearchState('loading');
+                      setRetrySearch((value) => value + 1);
+                    }}>
+                      Try again
+                    </button>
+                  </div>
+                )}
+                {currentSearchState === 'ready' && results.length === 0 && (
+                  <p className="px-3 py-3 text-sm text-slate-500">No matching results found</p>
+                )}
+                {currentSearchState === 'ready' && results.map((result, index) => (
+                  <button
+                    key={`${result.category}-${result.id}`}
+                    id={`global-search-result-${index}`}
+                    type="button"
+                    role="option"
+                    aria-selected={activeResultIndex === index}
+                    className={`block w-full rounded-xl px-3 py-2.5 text-left ${activeResultIndex === index ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setActiveResultIndex(index)}
+                    onClick={() => selectResult(result)}
+                  >
+                    <span className="block text-[11px] font-semibold uppercase tracking-wide text-blue-700">{result.category}</span>
+                    <span className="mt-0.5 block truncate text-sm font-medium text-slate-800">{result.name}</span>
+                    <span className="mt-0.5 block truncate text-xs text-slate-500">{result.description}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           <button type="button" onClick={() => setSearch('approval')} className="relative rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600" aria-label="Notifications">
             <Bell size={18} />
@@ -890,12 +1183,12 @@ function TopBar({
               <div className="text-[11px] text-slate-500">{userEmail ? 'Signed in' : 'Brand lead'}</div>
             </div>
           </div>
-          {demoMode && onExitDemo && (
-            <button type="button" onClick={onExitDemo} className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">
-              <LogOut size={16} /><span>Exit Demo</span>
+          {isEvaluatorDemo && onSignOut && (
+            <button type="button" onClick={onSignOut} className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100" aria-label="Sign out of demo account">
+              <LogOut size={16} /><span className="hidden lg:inline">Exit Demo</span>
             </button>
           )}
-          {onSignOut && !demoMode && (
+          {onSignOut && !demoMode && !isEvaluatorDemo && (
             <button type="button" onClick={onSignOut} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50" aria-label="Sign out">
               <LogOut size={16} /><span className="hidden lg:inline">Sign out</span>
             </button>
@@ -1134,6 +1427,8 @@ function AssetsPage({
   search,
   setSearch,
   assetLoadError,
+  selectedAssetSearchId,
+  onAssetSelectionChange,
 }: {
   assets: Asset[];
   setAssets: Dispatch<SetStateAction<Asset[]>>;
@@ -1141,16 +1436,18 @@ function AssetsPage({
   search: string;
   setSearch: (value: string) => void;
   assetLoadError: string;
+  selectedAssetSearchId: string | null;
+  onAssetSelectionChange: (id: string | null) => void;
 }) {
   const [view, setView] = useState<'grid' | 'list'>('grid');
   const [typeFilter, setTypeFilter] = useState('All');
   const [campaignFilter, setCampaignFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [sortBy, setSortBy] = useState('newest');
-  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [tagDraft, setTagDraft] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedAsset = assets.find((item) => item.id === selectedAssetSearchId) ?? null;
 
   const uploadSelectedFile = async (file: File) => {
     setIsUploading(true);
@@ -1188,7 +1485,6 @@ function AssetsPage({
           : asset,
       ),
     );
-    setSelectedAsset((current) => (current ? { ...current, tags: Array.from(new Set([...current.tags, value])) } : current));
     setTagDraft('');
   };
 
@@ -1196,7 +1492,6 @@ function AssetsPage({
     if (!selectedAsset) return;
     const nextTags = selectedAsset.tags.filter((item) => item !== tag);
     setAssets((current) => current.map((asset) => (asset.id === selectedAsset.id ? { ...asset, tags: nextTags } : asset)));
-    setSelectedAsset((current) => (current ? { ...current, tags: nextTags } : current));
   };
 
   const fileTypes = ['All', ...new Set(assets.map((asset) => asset.fileType))];
@@ -1285,7 +1580,7 @@ function AssetsPage({
                 </div>
                 <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
                   <span>{asset.uploadDate}</span>
-                  <button type="button" className="font-medium text-blue-700" onClick={() => setSelectedAsset(asset)}>View details</button>
+                  <button type="button" className="font-medium text-blue-700" onClick={() => onAssetSelectionChange(asset.id)}>View details</button>
                 </div>
               </div>
             </div>
@@ -1300,7 +1595,7 @@ function AssetsPage({
           <div className="h-full w-full max-w-md overflow-y-auto border-l border-slate-200 bg-white p-5 shadow-xl">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold text-slate-900">{selectedAsset.title}</h2>
-              <button type="button" className="rounded-lg border border-slate-200 p-2" onClick={() => setSelectedAsset(null)}><X size={16} /></button>
+              <button type="button" className="rounded-lg border border-slate-200 p-2" onClick={() => onAssetSelectionChange(null)}><X size={16} /></button>
             </div>
 
             <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
@@ -1344,25 +1639,49 @@ function AssetsPage({
 
 function GuidelinesPage({
   guidelines,
+  firebaseEnabled,
+  canManageGuidelines,
   onSave,
   onDelete,
+  onImportSaved,
+  selectedSearchId,
 }: {
   guidelines: BrandGuideline[];
+  firebaseEnabled: boolean;
+  canManageGuidelines: boolean;
   onSave: (next: BrandGuideline) => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
+  onImportSaved: (guidelines: ApiGuideline[], filename: string) => Promise<void>;
+  selectedSearchId: string | null;
 }) {
   const [selected, setSelected] = useState<BrandGuideline | null>(null);
-  const [form, setForm] = useState({ category: 'Brand Overview', title: '', description: '', value: '' });
+  const [form, setForm] = useState({
+    category: 'Brand Overview',
+    title: '',
+    description: '',
+    value: '',
+    requirementType: 'guidance' as NonNullable<BrandGuideline['requirementType']>,
+  });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [deleteError, setDeleteError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
+  useEffect(() => {
+    if (!selectedSearchId) return;
+    const guideline = guidelines.find((item) => item.id === selectedSearchId);
+    if (!guideline) return;
+    const timeout = window.setTimeout(() => {
+      document.getElementById(`guideline-item-${guideline.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+    return () => window.clearTimeout(timeout);
+  }, [guidelines, selectedSearchId]);
+
   const closeModal = () => {
     setIsModalOpen(false);
     setSelected(null);
     setSaveError('');
-    setForm({ category: 'Brand Overview', title: '', description: '', value: '' });
+    setForm({ category: 'Brand Overview', title: '', description: '', value: '', requirementType: 'guidance' });
   };
 
   const handleSubmit = async (event: FormEvent) => {
@@ -1374,7 +1693,11 @@ function GuidelinesPage({
       title: form.title.trim(),
       description: form.description.trim() || 'Brand guideline',
       value: form.value.trim(),
+      requirementType: form.requirementType,
       demo: true,
+      sourceDocumentId: selected?.sourceDocumentId,
+      sourceReference: selected?.sourceReference,
+      sourceExcerpt: selected?.sourceExcerpt,
     };
     setSaveError('');
     setIsSaving(true);
@@ -1400,30 +1723,46 @@ function GuidelinesPage({
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-semibold text-slate-900">Brand Guidelines</h1>
-          <p className="text-sm text-slate-500">Demo data is stored locally and can be edited in this workspace.</p>
+          <p className="text-sm text-slate-500">Manage active brand rules and import documented company policies.</p>
         </div>
-        <button type="button" className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white" onClick={() => {
+        {canManageGuidelines && <button type="button" className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white" onClick={() => {
           setSelected(null);
-          setForm({ category: 'Brand Overview', title: '', description: '', value: '' });
+          setForm({ category: 'Brand Overview', title: '', description: '', value: '', requirementType: 'guidance' });
           setSaveError('');
           setIsModalOpen(true);
         }}>
           <Plus size={16} /> Add Rule
-        </button>
+        </button>}
       </div>
+
+      {canManageGuidelines
+        ? <GuidelineImportSection firebaseEnabled={firebaseEnabled} onSaved={onImportSaved} />
+        : <p className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600">Approved company rules are shared in this workspace. Contact a workspace owner or admin to request changes.</p>}
 
       {Object.entries(grouped).map(([category, items]) => (
         <div key={category} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="mb-4 text-lg font-semibold text-slate-900">{category}</h2>
           <div className="space-y-3">
             {items.map((item) => (
-              <div key={item.id} className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 md:flex-row md:items-center md:justify-between">
+              <div
+                key={item.id}
+                id={`guideline-item-${item.id}`}
+                className={`flex flex-col gap-3 rounded-2xl border p-4 md:flex-row md:items-center md:justify-between ${
+                  selectedSearchId === item.id ? 'border-blue-300 bg-blue-50 ring-2 ring-blue-100' : 'border-slate-200 bg-slate-50'
+                }`}
+              >
                 <div>
                   <div className="font-medium text-slate-800">{item.title}</div>
                   <div className="mt-1 text-sm text-slate-500">{item.description}</div>
                   <div className="mt-2 text-sm font-medium text-slate-700">{item.value}</div>
+                  {item.sourceReference && (
+                    <div className="mt-2 text-xs text-blue-800">
+                      Imported from {item.sourceReference}
+                      {item.sourceExcerpt ? ` · “${item.sourceExcerpt}”` : ''}
+                    </div>
+                  )}
                 </div>
-                <div className="flex gap-2">
+                {canManageGuidelines && <div className="flex gap-2">
                   <button type="button" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700" onClick={() => {
                     setSelected(item);
                     setForm({
@@ -1431,6 +1770,7 @@ function GuidelinesPage({
                       title: item.title,
                       description: item.description,
                       value: item.value,
+                      requirementType: item.requirementType ?? 'guidance',
                     });
                     setSaveError('');
                     setIsModalOpen(true);
@@ -1447,7 +1787,7 @@ function GuidelinesPage({
                   >
                     <Trash2 size={14} className="inline" /> Delete
                   </button>
-                </div>
+                </div>}
               </div>
             ))}
           </div>
@@ -1496,9 +1836,14 @@ function GuidelinesPage({
             <form onSubmit={handleSubmit}>
               <div className="grid gap-4 md:grid-cols-2">
                 <select value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none">
-                  {['Brand Overview', 'Logo and Visual Identity', 'Brand Colors', 'Typography', 'Voice and Tone', 'Approved Product Facts', 'Pricing and Offers', 'Prohibited Terms', 'Approved Claims'].map((category) => (
+                  {['Company Identity', 'Brand Overview', 'Logo Usage', 'Logo and Visual Identity', 'Brand Colors', 'Typography', 'Tone of Voice', 'Voice and Tone', 'Approved Terminology', 'Approved Product Facts', 'Prohibited Terminology', 'Prohibited Terms', 'Pricing Rules', 'Pricing and Offers', 'Marketing Claims', 'Approved Claims', 'Image and Visual Guidelines', 'Social Media Guidelines', 'Other Company Policies'].map((category) => (
                     <option key={category} value={category}>{category}</option>
                   ))}
+                </select>
+                <select value={form.requirementType} onChange={(event) => setForm((current) => ({ ...current, requirementType: event.target.value as NonNullable<BrandGuideline['requirementType']> }))} aria-label="Rule requirement status" className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none">
+                  <option value="guidance">Guidance</option>
+                  <option value="required">Required</option>
+                  <option value="prohibited">Prohibited</option>
                 </select>
                 <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder="Rule title" aria-label="Rule title" required className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none" />
                 <div className="md:col-span-2">
@@ -1522,13 +1867,11 @@ function GuidelinesPage({
 }
 
 function CampaignReviewPage({
-  guidelines,
+  isDemoMode,
   onAuditComplete,
-  addActivity,
 }: {
-  guidelines: BrandGuideline[];
-  onAuditComplete: (next: AuditResult) => void | Promise<void>;
-  addActivity: (item: Omit<ActivityEvent, 'id' | 'timestamp'>) => void;
+  isDemoMode: boolean;
+  onAuditComplete: (submission: AuditSubmission) => void | Promise<void>;
 }) {
   const navigate = useNavigate();
   const [form, setForm] = useState<ReviewFormState>({
@@ -1547,17 +1890,10 @@ function CampaignReviewPage({
     setIsReviewing(true);
     setReviewError('');
     try {
-      await new Promise((resolve) => window.setTimeout(resolve, 900));
-      const result = {
-        ...runDemoAudit(form.name.trim(), form.type, form.copy, guidelines),
-        submittedContent: form.copy.trim(),
-      };
-      await onAuditComplete(result);
-      addActivity({
-        type: 'Campaign audit completed',
-        title: form.name.trim(),
-        status: 'Reviewed',
+      await onAuditComplete({
         campaignName: form.name.trim(),
+        campaignType: form.type,
+        submittedContent: form.copy.trim(),
       });
       navigate('/results');
     } catch (error) {
@@ -1571,7 +1907,11 @@ function CampaignReviewPage({
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-semibold text-slate-900">Campaign Review</h1>
-        <p className="text-sm text-slate-500">Run a deterministic demo brand audit against your active guidelines.</p>
+        <p className="text-sm text-slate-500">
+          {isDemoMode
+            ? 'Sample rule checks run in this temporary demo; results are not saved to your account.'
+            : 'Check campaign text against your saved brand guidelines. When configured, campaign text and active rules are sent to the selected Gemini or Groq provider; otherwise only local deterministic checks run.'}
+        </p>
       </div>
 
       <form onSubmit={handleSubmit} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -1590,11 +1930,11 @@ function CampaignReviewPage({
             </select>
           </div>
           <div className="lg:col-span-2">
-            <label className="mb-2 block text-sm font-medium text-slate-700">Marketing copy</label>
+            <label className="mb-2 block text-sm font-medium text-slate-700">Campaign text</label>
             <textarea value={form.copy} required onChange={(event) => setForm((current) => ({ ...current, copy: event.target.value }))} className="min-h-52 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-blue-300" placeholder="Paste marketing copy here" />
           </div>
           <div className="lg:col-span-2">
-            <label className="mb-2 block text-sm font-medium text-slate-700">Asset preview</label>
+            <label className="mb-2 block text-sm font-medium text-slate-700">Optional image preview (not analyzed)</label>
             <div className="flex flex-col gap-3 md:flex-row md:items-center">
               <input type="file" accept="image/*" onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -1608,7 +1948,7 @@ function CampaignReviewPage({
         {reviewError && <p role="alert" className="mt-4 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{reviewError}</p>}
         <div className="mt-5 flex justify-end">
           <button type="submit" disabled={isReviewing} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-blue-300">
-            {isReviewing ? 'Running audit...' : 'Run Brand Audit'}
+            {isReviewing ? 'Running guideline audit…' : 'Run Brand Audit'}
             <ArrowRight size={16} />
           </button>
         </div>
@@ -1617,12 +1957,283 @@ function CampaignReviewPage({
   );
 }
 
+function VideoReviewPage({ firebaseEnabled }: { firebaseEnabled: boolean }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+  const [reviews, setReviews] = useState<ApiVideoReview[]>([]);
+  const [selectedReview, setSelectedReview] = useState<ApiVideoReview | null>(null);
+  const [loading, setLoading] = useState(firebaseEnabled);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [progressMessage, setProgressMessage] = useState('');
+  const submissionInProgressRef = useRef(false);
+
+  useEffect(() => () => {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseEnabled) return;
+    let active = true;
+    listVideoReviews()
+      .then((items) => {
+        if (active) {
+          setReviews(items);
+          setSelectedReview(items[0] ?? null);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active) setError(`Video reviews could not be loaded: ${backendErrorMessage(loadError)}`);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [firebaseEnabled]);
+
+  const submitReview = async (selectedFile: File, isRetry = false) => {
+    if (submissionInProgressRef.current || !firebaseEnabled) return;
+    submissionInProgressRef.current = true;
+    setUploading(true);
+    setError('');
+    setSuccess('');
+    setProgressMessage(
+      isRetry
+        ? 'Retrying analysis with the selected video. The active AI provider applies its configured recovery policy.'
+        : 'Uploading the video and analyzing sampled frames. Temporary provider failures may be retried automatically.',
+    );
+    try {
+      const review = await uploadVideoForReview(selectedFile);
+      setReviews((current) => [review, ...current]);
+      setSelectedReview(review);
+      setSuccess(
+        review.fallback_used
+          ? `Analysis completed and saved for ${review.original_filename} using backup model ${review.model_used}.`
+          : `Analysis completed and saved for ${review.original_filename} using ${review.model_used ?? 'Gemini'}.`,
+      );
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+      setPreviewUrl(null);
+      setFile(null);
+    } catch (uploadError) {
+      const detail = backendErrorMessage(uploadError);
+      const dailyQuotaExhausted = /daily.*quota|quota.*daily/i.test(detail);
+      const temporaryProviderFailure = /HTTP 50[0234]|UNAVAILABLE|overload|high demand|temporarily unavailable|remained unavailable|rate limits persisted/i.test(detail);
+      setError(
+        dailyQuotaExhausted
+          ? `The selected AI provider's daily request quota is exhausted. Wait until its quota resets, then retry; your selected video is still available and no review was saved. ${detail}`
+          : temporaryProviderFailure
+            ? `The selected AI provider is temporarily overloaded or unavailable. Analysis failed without saving a review. ${detail}`
+            : `Analysis failed without saving a review. ${detail}`,
+      );
+      setSuccess('');
+    } finally {
+      submissionInProgressRef.current = false;
+      setUploading(false);
+      setProgressMessage('');
+    }
+  };
+
+  const handleUpload = (event: FormEvent) => {
+    event.preventDefault();
+    if (file) void submitReview(file);
+  };
+
+  const formatDuration = (seconds: number) => {
+    const minutes = Math.floor(seconds / 60);
+    const remaining = Math.floor(seconds % 60);
+    return `${minutes}:${String(remaining).padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-blue-700">Creative quality</p>
+          <h1 className="text-3xl font-semibold text-slate-900">Video Review</h1>
+          <p className="mt-1 max-w-2xl text-sm text-slate-500">
+            Review sampled frames for visual consistency and clearly legible on-screen text against your saved brand guidelines.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+          <Clock3 size={15} className="text-blue-700" />
+          Up to 50 MB · 3 minutes · 12 sampled frames
+        </div>
+      </div>
+
+      {!firebaseEnabled && (
+        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          Video reviews require an authenticated workspace and the FastAPI backend. They are unavailable in demo mode.
+        </div>
+      )}
+
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
+        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 px-5 py-4">
+            <h2 className="font-semibold text-slate-900">New review</h2>
+            <p className="mt-1 text-sm text-slate-500">MP4, MOV, M4V, AVI, or WebM</p>
+          </div>
+          <form onSubmit={handleUpload} className="space-y-4 p-5" aria-busy={uploading}>
+            <label className="flex min-h-40 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center transition hover:border-blue-400 hover:bg-blue-50/40">
+              <Video size={25} className="mb-3 text-blue-700" />
+              <span className="text-sm font-medium text-slate-800">{file?.name ?? 'Choose a video to review'}</span>
+              <span className="mt-1 text-xs text-slate-500">Maximum file size 50 MB</span>
+              <input
+                type="file"
+                accept="video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi"
+                className="sr-only"
+                disabled={!firebaseEnabled || uploading}
+                onChange={(event) => {
+                  const nextFile = event.target.files?.[0] ?? null;
+                  if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+                  previewUrlRef.current = nextFile ? URL.createObjectURL(nextFile) : null;
+                  setFile(nextFile);
+                  setPreviewUrl(previewUrlRef.current);
+                  setError('');
+                }}
+              />
+            </label>
+            {previewUrl && <video src={previewUrl} controls className="max-h-72 w-full rounded-lg bg-slate-950" />}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+              <p className="max-w-md text-xs leading-5 text-slate-500">
+                Only sampled frames are analyzed. Text and captions are checked only when legible in a sampled frame; audio transcription is not supported.
+              </p>
+              <button
+                type="submit"
+                disabled={!file || !firebaseEnabled || uploading}
+                className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {uploading ? <LoaderCircle size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                {uploading ? 'Uploading and analyzing…' : 'Review video'}
+              </button>
+            </div>
+            {uploading && (
+              <p role="status" aria-live="polite" className="text-sm text-blue-800">
+                {progressMessage}
+              </p>
+            )}
+          </form>
+          {success && <p role="status" className="mx-5 mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-800">{success}</p>}
+          {error && (
+            <div className="mx-5 mb-5 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-800">
+              <p role="alert">{error}</p>
+              {file && firebaseEnabled && (
+                <button
+                  type="button"
+                  disabled={uploading}
+                  onClick={() => void submitReview(file, true)}
+                  className="mt-2 rounded-md border border-red-300 bg-white px-3 py-1.5 font-medium text-red-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {/daily.*quota|quota.*daily/i.test(error) ? 'Retry after quota reset' : 'Retry Analysis'}
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="min-w-0 rounded-xl border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 px-5 py-4">
+            <h2 className="font-semibold text-slate-900">Review results</h2>
+            <p className="mt-1 text-sm text-slate-500">Timestamped observations from sampled frames and legible on-screen text</p>
+          </div>
+          {loading ? (
+            <div className="flex items-center gap-2 p-6 text-sm text-slate-500"><LoaderCircle size={16} className="animate-spin" /> Loading review history…</div>
+          ) : selectedReview ? (
+            <div>
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-slate-900">{selectedReview.original_filename}</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {formatDuration(selectedReview.duration_seconds)} · {selectedReview.frame_count} frames · {new Date(selectedReview.created_at).toLocaleString()}
+                  </p>
+                </div>
+                {selectedReview.analysis_mode === 'demo_sample' ? (
+                  <span className="shrink-0 rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-900">
+                    Demonstration sample · not AI analyzed
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-800">
+                    Analysis completed · {selectedReview.model_used ?? 'Gemini'}
+                    {selectedReview.fallback_used ? ' backup model' : ''}
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-px border-b border-slate-100 bg-slate-100">
+                <div className="bg-white px-4 py-3">
+                  <p className="text-[11px] font-medium uppercase text-slate-500">Compliance</p>
+                  <p className="mt-1 text-xl font-semibold text-slate-900">{selectedReview.compliance_score}%</p>
+                </div>
+                <div className="bg-white px-4 py-3">
+                  <p className="text-[11px] font-medium uppercase text-slate-500">Risk score</p>
+                  <p className="mt-1 text-xl font-semibold text-slate-900">{selectedReview.risk_score}<span className="text-xs font-normal text-slate-500"> / 100</span></p>
+                </div>
+                <div className="bg-white px-4 py-3">
+                  <p className="text-[11px] font-medium uppercase text-slate-500">Risk level</p>
+                  <p className={`mt-1 text-base font-semibold capitalize ${selectedReview.risk_category === 'high' ? 'text-red-700' : selectedReview.risk_category === 'medium' ? 'text-amber-700' : 'text-emerald-700'}`}>{selectedReview.risk_category}</p>
+                </div>
+              </div>
+              <p className="border-b border-slate-100 px-5 py-2 text-xs text-slate-500">
+                {selectedReview.analysis_mode === 'demo_sample'
+                  ? 'Illustrative demonstration scores only; this sample is not a real video analysis.'
+                  : 'Risk score is severity-weighted from returned findings (Low 10, Medium 20, High 35), capped at 100. It is not a confidence score.'}
+              </p>
+              {selectedReview.findings.length ? (
+                <ul className="divide-y divide-slate-100">
+                  {selectedReview.findings.map((finding, index) => (
+                    <li key={`${finding.timestamp_seconds}-${index}`} className="space-y-2 px-5 py-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded bg-slate-100 px-2 py-1 font-mono text-xs font-semibold text-slate-700">{finding.timestamp}</span>
+                        <span className={`rounded px-2 py-1 text-xs font-semibold ${finding.severity === 'high' ? 'bg-red-50 text-red-700' : finding.severity === 'medium' ? 'bg-amber-50 text-amber-800' : 'bg-sky-50 text-sky-800'}`}>
+                          {finding.severity.toUpperCase()}
+                        </span>
+                        <span className="text-xs capitalize text-slate-500">{finding.category.replaceAll('_', ' ')}</span>
+                      </div>
+                      <h3 className="text-sm font-semibold text-slate-900">{finding.title}</h3>
+                      <p className="text-sm leading-5 text-slate-600">{finding.evidence} {finding.explanation}</p>
+                      <p className="border-l-2 border-blue-600 pl-3 text-sm leading-5 text-slate-700">{finding.suggested_correction}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="px-5 py-8 text-sm text-slate-600">No specific brand issues were identified in the sampled frames.</p>
+              )}
+              {reviews.length > 1 && (
+                <div className="border-t border-slate-200 px-5 py-3">
+                  <label className="sr-only" htmlFor="video-review-history">Select a previous video review</label>
+                  <select
+                    id="video-review-history"
+                    value={selectedReview.id}
+                    onChange={(event) => setSelectedReview(reviews.find((review) => review.id === Number(event.target.value)) ?? null)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                  >
+                    {reviews.map((review) => <option key={review.id} value={review.id}>{review.original_filename} · {new Date(review.created_at).toLocaleDateString()}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="px-5 py-10 text-center">
+              <Video size={24} className="mx-auto mb-3 text-slate-400" />
+              <p className="text-sm font-medium text-slate-800">No video reviews yet</p>
+              <p className="mt-1 text-sm text-slate-500">Your completed reviews will appear here.</p>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function ReviewResultsPage({
+  isDemoMode,
   auditResult,
   audits,
   onSelectAudit,
   onFindingStatusChange,
 }: {
+  isDemoMode: boolean;
   auditResult: AuditResult | null;
   audits: AuditResult[];
   onSelectAudit: (audit: AuditResult) => void;
@@ -1687,14 +2298,29 @@ function ReviewResultsPage({
       <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Rule-based audit</p>
+            <p className="text-xs uppercase tracking-[0.22em] text-slate-500">
+              {auditResult.analysisMode === 'gemini_assisted'
+                ? 'Gemini-assisted, evidence-validated audit'
+                : auditResult.analysisMode === 'groq_assisted'
+                  ? 'Groq-assisted, evidence-validated audit'
+                : isDemoMode
+                  ? 'Sample rule-based audit'
+                  : 'Evidence-based rule audit'}
+            </p>
             <h1 className="mt-2 text-3xl font-semibold text-slate-900">{auditResult.campaignName}</h1>
           </div>
           <div className="rounded-2xl bg-slate-50 px-4 py-3 text-right">
-            <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Overall risk score</div>
+            <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{isDemoMode ? 'Sample demo score' : 'Overall risk score / 100'}</div>
             <div className="text-3xl font-semibold text-slate-900">{auditResult.overallScore}</div>
           </div>
         </div>
+        <p className="mt-3 text-sm text-slate-500">
+          {isDemoMode
+            ? 'Sample rule checks only; these demo results are temporary and do not represent an AI confidence score.'
+            : auditResult.analysisMode === 'gemini_assisted' || auditResult.analysisMode === 'groq_assisted'
+              ? `${auditResult.analysisMode === 'groq_assisted' ? 'Groq' : 'Gemini'}-assisted analysis; each AI finding is checked against an exact text excerpt and an active guideline. A human reviewer should confirm context. The risk score is not a model confidence score.`
+              : 'No live AI provider analysis was used. Deterministic text checks only. The risk score adds 10 for each Low, 20 for each Medium, and 35 for each High finding, capped at 100; it is not an AI confidence score.'}
+        </p>
 
         <div className="mt-5 grid gap-4 md:grid-cols-4">
           <MetricTile label="Risk category" value={auditResult.riskLevel} />
@@ -1708,6 +2334,11 @@ function ReviewResultsPage({
         <h2 className="text-lg font-semibold text-slate-900">Detailed findings</h2>
         {findingError && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{findingError}</p>}
         <div className="mt-4 space-y-4">
+          {auditResult.findings.length === 0 && (
+            <p role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+              No configured text rules were triggered. This does not certify claims or evaluate visual assets; complete a human review before publication.
+            </p>
+          )}
           {auditResult.findings.map((finding) => (
             <div key={finding.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -1761,17 +2392,36 @@ function ReviewResultsPage({
   );
 }
 
-function ApprovalsPage({ approvals, onApprovalUpdate }: { approvals: Approval[]; onApprovalUpdate: (id: string, status: Approval['status'], comment?: string) => void }) {
-  const [tab, setTab] = useState<'All' | 'Pending' | 'Approved' | 'Rejected'>('All');
+function ApprovalsPage({ approvals, onApprovalUpdate }: {
+  approvals: Approval[];
+  onApprovalUpdate: (id: string, status: Approval['status'], comment?: string) => Promise<boolean>;
+}) {
+  const [tab, setTab] = useState<'All' | 'Pending' | 'Approved' | 'Rejected' | 'Changes requested'>('All');
   const [query, setQuery] = useState('');
   const [selectedApproval, setSelectedApproval] = useState<Approval | null>(null);
   const [comment, setComment] = useState('');
+  const [savingApprovalId, setSavingApprovalId] = useState<string | null>(null);
 
   const filtered = approvals.filter((approval) => {
-    const matchesTab = tab === 'All' || approval.status === tab.toLowerCase();
+    const matchesTab = tab === 'All' ||
+      approval.status === (tab === 'Changes requested' ? 'changes_requested' : tab.toLowerCase());
     const matchesQuery = !query || approval.campaignName.toLowerCase().includes(query.toLowerCase()) || approval.submittedBy.toLowerCase().includes(query.toLowerCase());
     return matchesTab && matchesQuery;
   });
+
+  const updateApproval = async (approval: Approval, decision: Approval['status'], note?: string) => {
+    if (savingApprovalId || approval.status !== 'pending') return;
+    setSavingApprovalId(approval.id);
+    try {
+      const saved = await onApprovalUpdate(approval.id, decision, note);
+      if (saved && selectedApproval?.id === approval.id) {
+        setSelectedApproval(null);
+        setComment('');
+      }
+    } finally {
+      setSavingApprovalId(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -1783,8 +2433,8 @@ function ApprovalsPage({ approvals, onApprovalUpdate }: { approvals: Approval[];
       <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="flex flex-wrap gap-2">
-            {['All', 'Pending', 'Approved', 'Rejected'].map((value) => (
-              <button type="button" key={value} onClick={() => setTab(value as 'All' | 'Pending' | 'Approved' | 'Rejected')} className={`rounded-xl px-3 py-2 text-sm font-medium ${tab === value ? 'bg-blue-600 text-white' : 'border border-slate-200 bg-white text-slate-700'}`}>
+            {['All', 'Pending', 'Approved', 'Rejected', 'Changes requested'].map((value) => (
+              <button type="button" key={value} onClick={() => setTab(value as 'All' | 'Pending' | 'Approved' | 'Rejected' | 'Changes requested')} className={`rounded-xl px-3 py-2 text-sm font-medium ${tab === value ? 'bg-blue-600 text-white' : 'border border-slate-200 bg-white text-slate-700'}`}>
                 {value}
               </button>
             ))}
@@ -1812,14 +2462,16 @@ function ApprovalsPage({ approvals, onApprovalUpdate }: { approvals: Approval[];
               </div>
               <div className="flex items-center gap-3">
                 <StatusBadge value={approval.riskLevel} />
-                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusStyles[approval.status] || 'bg-slate-100 text-slate-700'}`}>{approval.status}</span>
+                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusStyles[approval.status] || 'bg-slate-100 text-slate-700'}`}>{approval.status.replace('_', ' ')}</span>
               </div>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               <button type="button" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700" onClick={() => setSelectedApproval(approval)}>Inspect</button>
-              <button type="button" className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white" onClick={() => onApprovalUpdate(approval.id, 'approved')}>Approve</button>
-              <button type="button" className="rounded-xl bg-red-600 px-3 py-2 text-sm font-medium text-white" onClick={() => onApprovalUpdate(approval.id, 'rejected', 'Please revise the final copy and pricing details.')}>Reject</button>
-              <button type="button" className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700" onClick={() => onApprovalUpdate(approval.id, 'pending', 'Revision requested by compliance team.')}>Request changes</button>
+              {approval.status === 'pending' && <>
+                <button type="button" disabled={savingApprovalId !== null} className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void updateApproval(approval, 'approved')}>Approve</button>
+                <button type="button" disabled={savingApprovalId !== null} className="rounded-xl bg-red-600 px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void updateApproval(approval, 'rejected', 'Please revise the final copy and pricing details.')}>Reject</button>
+                <button type="button" disabled={savingApprovalId !== null} className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void updateApproval(approval, 'changes_requested', 'Revision requested by compliance team.')}>Request changes</button>
+              </>}
             </div>
           </div>
         ))}
@@ -1834,8 +2486,8 @@ function ApprovalsPage({ approvals, onApprovalUpdate }: { approvals: Approval[];
             </div>
             <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Add a note for the review" className="min-h-24 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none" />
             <div className="flex justify-end gap-3">
-              <button type="button" className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700" onClick={() => setSelectedApproval(null)}>Close</button>
-              <button type="button" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white" onClick={() => { onApprovalUpdate(selectedApproval.id, 'approved', comment); setSelectedApproval(null); }}>Save decision</button>
+              <button type="button" disabled={savingApprovalId !== null} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 disabled:opacity-50" onClick={() => setSelectedApproval(null)}>Close</button>
+              {selectedApproval.status === 'pending' && <button type="button" disabled={savingApprovalId !== null} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void updateApproval(selectedApproval, 'approved', comment)}>Approve</button>}
             </div>
           </div>
         </Modal>
@@ -1885,6 +2537,196 @@ function ActivityPage({ activity }: { activity: ActivityEvent[] }) {
   );
 }
 
+function WorkspaceSharingSection() {
+  const [workspaces, setWorkspaces] = useState<ApiWorkspace[]>([]);
+  const [invitations, setInvitations] = useState<ApiWorkspaceInvitation[]>([]);
+  const [members, setMembers] = useState<ApiWorkspaceMember[]>([]);
+  const [selectedId, setSelectedId] = useState(() => getStoredWorkspaceId() ?? '');
+  const [workspaceName, setWorkspaceName] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<'member' | 'admin'>('member');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const selected = workspaces.find((item) => item.id === selectedId);
+
+  const refresh = async (preferredId?: string) => {
+    const workspaceData = await listWorkspaceData();
+    const items = workspaceData.workspaces;
+    setInvitations(workspaceData.pending_invitations);
+    setWorkspaces(items);
+    const activeId = preferredId ?? items.find((item) => item.id === selectedId)?.id ?? items[0]?.id ?? '';
+    setSelectedId(activeId);
+    if (activeId) setMembers(await listWorkspaceMembers(activeId));
+  };
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const workspaceData = await listWorkspaceData();
+        const items = workspaceData.workspaces;
+        const selectedWorkspace = items.find((item) => item.id === getStoredWorkspaceId()) ?? items[0];
+        if (!active) return;
+        setWorkspaces(items);
+        setInvitations(workspaceData.pending_invitations);
+        setSelectedId(selectedWorkspace?.id ?? '');
+        if (selectedWorkspace) {
+          const workspaceMembers = await listWorkspaceMembers(selectedWorkspace.id);
+          if (active) setMembers(workspaceMembers);
+        }
+      } catch (loadError) {
+        if (active) setError(backendErrorMessage(loadError));
+      }
+    };
+    void load();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const switchWorkspace = (workspaceId: string) => {
+    setActiveWorkspaceId(workspaceId);
+    window.location.reload();
+  };
+
+  const submitCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const workspace = await createWorkspace(workspaceName);
+      setWorkspaceName('');
+      setNotice('Workspace created. Invite verified company accounts to share approved guidelines.');
+      setActiveWorkspaceId(workspace.id);
+      window.location.reload();
+    } catch (createError) {
+      setError(backendErrorMessage(createError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitInvite = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selected || !['owner', 'admin'].includes(selected.role)) return;
+    setBusy(true);
+    setError('');
+    try {
+      await inviteWorkspaceMember(selected.id, inviteEmail, inviteRole);
+      setInviteEmail('');
+      setNotice('Invitation recorded. The recipient must sign in with this verified email to join.');
+    } catch (inviteError) {
+      setError(backendErrorMessage(inviteError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const acceptInvitation = async (invitationId: string) => {
+    setBusy(true);
+    setError('');
+    try {
+      await acceptWorkspaceInvitation(invitationId);
+      await refresh();
+      setNotice('Workspace invitation accepted.');
+    } catch (acceptError) {
+      setError(backendErrorMessage(acceptError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="text-lg font-semibold text-slate-900">Company workspace access</h2>
+      <p className="mt-1 text-sm text-slate-600">Share approved guidelines with explicitly invited members. Each workspace remains isolated.</p>
+      {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
+      {notice && <p role="status" className="mt-3 text-sm text-emerald-700">{notice}</p>}
+      {invitations.length > 0 && (
+        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-3">
+          <h3 className="text-sm font-semibold text-slate-800">Workspace invitations</h3>
+          {invitations.map((invitation) => (
+            <div key={invitation.id} className="mt-2 flex items-center justify-between gap-3 text-sm">
+              <span>{invitation.workspace_name} · {invitation.role}</span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void acceptInvitation(invitation.id)}
+                className="rounded-lg bg-blue-600 px-3 py-1.5 font-medium text-white disabled:opacity-50"
+              >
+                Accept
+              </button>
+            </div>
+          ))}
+          <p className="mt-2 text-xs text-slate-600">Only invitations matching your verified Firebase email are shown.</p>
+        </div>
+      )}
+      <div className="mt-4">
+        <label className="mb-2 block text-sm font-medium text-slate-700" htmlFor="active-workspace">Active workspace</label>
+        <select
+          id="active-workspace"
+          value={selectedId}
+          onChange={(event) => switchWorkspace(event.target.value)}
+          className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm"
+        >
+          {workspaces.map((workspace) => (
+            <option value={workspace.id} key={workspace.id}>{workspace.name} · {workspace.role}</option>
+          ))}
+        </select>
+      </div>
+      {selected && (
+        <div className="mt-5">
+          <h3 className="text-sm font-semibold text-slate-800">Members</h3>
+          <ul className="mt-2 space-y-2 text-sm text-slate-600">
+            {members.map((member) => (
+              <li key={member.user_id} className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+                <span>{member.email || member.user_id}</span><span className="capitalize">{member.role}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {selected && ['owner', 'admin'].includes(selected.role) && (
+        <form onSubmit={submitInvite} className="mt-5 grid gap-3 sm:grid-cols-[1fr_auto_auto]">
+          <input
+            type="email"
+            required
+            value={inviteEmail}
+            onChange={(event) => setInviteEmail(event.target.value)}
+            placeholder="Company member email"
+            aria-label="Company member email"
+            className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
+          />
+          <select
+            aria-label="Invitation role"
+            value={inviteRole}
+            onChange={(event) => setInviteRole(event.target.value as 'member' | 'admin')}
+            className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
+          >
+            <option value="member">Member</option>
+            {selected.role === 'owner' && <option value="admin">Admin</option>}
+          </select>
+          <button disabled={busy} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">Invite</button>
+        </form>
+      )}
+      <form onSubmit={submitCreate} className="mt-5 flex gap-3">
+        <input
+          required
+          minLength={2}
+          maxLength={120}
+          value={workspaceName}
+          onChange={(event) => setWorkspaceName(event.target.value)}
+          placeholder="New company workspace name"
+          aria-label="New workspace name"
+          className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
+        />
+        <button disabled={busy} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 disabled:opacity-50">Create workspace</button>
+      </form>
+    </section>
+  );
+}
+
 function SettingsPage({
   settings,
   onChange,
@@ -1898,10 +2740,6 @@ function SettingsPage({
 }) {
   const [form, setForm] = useState(settings);
 
-  useEffect(() => {
-    setForm(settings);
-  }, [settings]);
-
   const update = (key: keyof WorkspaceSettings, value: WorkspaceSettings[keyof WorkspaceSettings]) => {
     const next = { ...form, [key]: value };
     setForm(next);
@@ -1910,12 +2748,16 @@ function SettingsPage({
 
   return (
     <div className="space-y-6">
+      {firebaseEnabled && <WorkspaceSharingSection />}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-semibold text-slate-900">Settings</h1>
           <p className="text-sm text-slate-500">Workspace profile, notifications, and review preferences.</p>
         </div>
-        {!firebaseEnabled && <button type="button" onClick={onResetDemo} className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-medium text-red-700">Reset demo data</button>}
+        {!firebaseEnabled && <button type="button" onClick={() => {
+          onResetDemo();
+          setForm(defaultSettings);
+        }} className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-medium text-red-700">Reset demo data</button>}
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
@@ -2047,7 +2889,7 @@ function ConfigurationNotice({
         <div className="flex items-start gap-3">
           <CircleAlert className="mt-0.5 shrink-0 text-amber-600" size={20} />
           <div>
-            <h1 className="text-lg font-semibold text-slate-900">Workspace setup needed</h1>
+            <h1 className="text-lg font-semibold text-slate-900">Application data unavailable</h1>
             <p role="alert" className="mt-2 text-sm leading-6 text-slate-600">{message}</p>
             {actionLabel && onAction && (
               <button type="button" onClick={onAction} className="mt-4 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white">

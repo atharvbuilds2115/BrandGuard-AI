@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import firebase_admin
+from google.auth.exceptions import DefaultCredentialsError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from firebase_admin import auth as firebase_auth
@@ -16,24 +18,44 @@ bearer_scheme = HTTPBearer(auto_error=False)
 _app_lock = Lock()
 
 
+def _validate_firebase_app(app: firebase_admin.App, expected_project_id: str) -> firebase_admin.App:
+    if app.project_id != expected_project_id:
+        raise RuntimeError(
+            'Firebase Admin project ID does not match FIREBASE_PROJECT_ID. '
+            'Use credentials and configuration for the same Firebase project as the web app.'
+        )
+    return app
+
+
+@dataclass(frozen=True)
+class FirebaseIdentity:
+    uid: str
+    email: str | None
+    display_name: str | None
+    email_verified: bool = False
+
+
 def _firebase_admin_app() -> firebase_admin.App:
+    expected_project_id = os.getenv('FIREBASE_PROJECT_ID', '').strip()
+    if not expected_project_id:
+        raise RuntimeError(
+            'FIREBASE_PROJECT_ID is required and must match VITE_FIREBASE_PROJECT_ID.'
+        )
+
     try:
-        return firebase_admin.get_app()
+        return _validate_firebase_app(firebase_admin.get_app(), expected_project_id)
     except ValueError:
         pass
 
     with _app_lock:
         try:
-            return firebase_admin.get_app()
+            return _validate_firebase_app(firebase_admin.get_app(), expected_project_id)
         except ValueError:
             service_account_path = (
                 os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH')
                 or os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
             )
-            options: dict[str, str] = {}
-            project_id = os.getenv('FIREBASE_PROJECT_ID')
-            if project_id:
-                options['projectId'] = project_id
+            options = {'projectId': expected_project_id}
 
             try:
                 if service_account_path:
@@ -41,8 +63,19 @@ def _firebase_admin_app() -> firebase_admin.App:
                     if not path.is_file():
                         raise RuntimeError('The configured Firebase service-account file does not exist.')
                     credential = credentials.Certificate(str(path))
-                    return firebase_admin.initialize_app(credential, options=options)
-                return firebase_admin.initialize_app(options=options)
+                    if credential.project_id != expected_project_id:
+                        raise RuntimeError(
+                            'The Firebase service-account project_id does not match FIREBASE_PROJECT_ID.'
+                        )
+                    app = firebase_admin.initialize_app(credential, options=options)
+                else:
+                    credential = credentials.ApplicationDefault()
+                    if credential.project_id != expected_project_id:
+                        raise RuntimeError(
+                            'The Application Default Credentials project ID does not match FIREBASE_PROJECT_ID.'
+                        )
+                    app = firebase_admin.initialize_app(credential, options=options)
+                return _validate_firebase_app(app, expected_project_id)
             except RuntimeError:
                 raise
             except Exception as error:
@@ -52,9 +85,9 @@ def _firebase_admin_app() -> firebase_admin.App:
                 ) from error
 
 
-def require_firebase_user(
+def require_firebase_identity(
     authorization: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> str:
+) -> FirebaseIdentity:
     if authorization is None or authorization.scheme.lower() != 'bearer':
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -76,11 +109,53 @@ def require_firebase_user(
             app=app,
             check_revoked=True,
         )
-    except (FirebaseError, ValueError) as error:
+    except firebase_auth.ExpiredIdTokenError as error:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='The Firebase ID token is invalid, expired, or revoked.',
+            detail='The Firebase ID token has expired. Refresh the session and try again.',
             headers={'WWW-Authenticate': 'Bearer'},
+        ) from error
+    except firebase_auth.RevokedIdTokenError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='The Firebase ID token has been revoked. Sign in again.',
+            headers={'WWW-Authenticate': 'Bearer'},
+        ) from error
+    except firebase_auth.UserDisabledError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='This Firebase account is disabled.',
+            headers={'WWW-Authenticate': 'Bearer'},
+        ) from error
+    except firebase_auth.CertificateFetchError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Firebase token verification is temporarily unavailable.',
+        ) from error
+    except DefaultCredentialsError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                'Firebase Admin credentials are unavailable. Set FIREBASE_SERVICE_ACCOUNT_PATH '
+                'or configure Application Default Credentials.'
+            ),
+        ) from error
+    except firebase_auth.InvalidIdTokenError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='The Firebase ID token is invalid or was issued for a different Firebase project.',
+            headers={'WWW-Authenticate': 'Bearer'},
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='The Firebase ID token is malformed.',
+            headers={'WWW-Authenticate': 'Bearer'},
+        ) from error
+    except FirebaseError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Firebase token verification is temporarily unavailable.',
         ) from error
 
     user_id = decoded_token.get('uid')
@@ -90,4 +165,16 @@ def require_firebase_user(
             detail='The Firebase ID token did not contain a valid user ID.',
             headers={'WWW-Authenticate': 'Bearer'},
         )
-    return user_id
+    email = decoded_token.get('email')
+    display_name = decoded_token.get('name')
+    email_verified = decoded_token.get('email_verified')
+    return FirebaseIdentity(
+        uid=user_id,
+        email=email if isinstance(email, str) else None,
+        display_name=display_name if isinstance(display_name, str) else None,
+        email_verified=email_verified is True,
+    )
+
+
+def require_firebase_user(identity: FirebaseIdentity = Depends(require_firebase_identity)) -> str:
+    return identity.uid

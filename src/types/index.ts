@@ -1,7 +1,7 @@
 export type RiskSeverity = 'High' | 'Medium' | 'Low';
 export type AuditStatus = 'Confirmed' | 'Needs verification' | 'Resolved' | 'Needs review';
 export type AssetStatus = 'Approved' | 'Pending' | 'Flagged';
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'changes_requested';
 
 export interface Asset {
   id: string;
@@ -23,6 +23,12 @@ export interface BrandGuideline {
   description: string;
   value: string;
   demo: boolean;
+  severity?: string;
+  active?: boolean;
+  requirementType?: 'required' | 'prohibited' | 'guidance';
+  sourceDocumentId?: number;
+  sourceReference?: string;
+  sourceExcerpt?: string;
 }
 
 export interface Campaign {
@@ -56,6 +62,13 @@ export interface AuditResult {
   recommendations: string[];
   demoNote: string;
   submittedContent?: string;
+  analysisMode?: 'rules_only' | 'gemini_assisted' | 'groq_assisted' | 'demo';
+}
+
+export interface AuditSubmission {
+  campaignName: string;
+  campaignType: string;
+  submittedContent: string;
 }
 
 export interface Approval {

@@ -11,20 +11,23 @@ from ..database import get_db
 from ..models import Asset
 from ..schemas import AssetOut, AssetUpdate
 from ..services.asset_service import MAX_UPLOAD_SIZE_BYTES, get_upload_directory, persist_asset
+from ..services.workspace_service import WorkspaceAccess
+from ..workspace_auth import require_workspace_access
 
-router = APIRouter(prefix='/api', tags=['assets'])
+router = APIRouter(prefix='/api', tags=['assets'], dependencies=[Depends(require_workspace_access)])
 
 
 @router.get('/assets', response_model=list[AssetOut])
 def list_assets(
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
     q: str | None = None,
     file_type: str | None = None,
     status: str | None = None,
     sort: str = 'newest',
 ):
-    query = db.query(Asset).filter(Asset.user_id == user_id)
+    query = db.query(Asset).filter(Asset.workspace_id == access.workspace_id)
     if q:
         like = f'%{q}%'
         query = query.filter((Asset.original_filename.ilike(like)) | (Asset.tags.ilike(like)))
@@ -47,9 +50,10 @@ def list_assets(
 def get_asset(
     asset_id: int,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.user_id == user_id).first()
+    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
     return asset
@@ -60,11 +64,15 @@ async def upload_asset(
     file: UploadFile = File(...),
     campaign_name: str | None = Form(default=None),
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
     content = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
     try:
         asset = persist_asset(db, file, content, campaign_name, user_id)
+        asset.workspace_id = access.workspace_id
+        db.commit()
+        db.refresh(asset)
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     return asset
@@ -75,9 +83,10 @@ def update_asset(
     asset_id: int,
     payload: AssetUpdate,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.user_id == user_id).first()
+    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
 
@@ -93,9 +102,10 @@ def update_asset(
 def delete_asset(
     asset_id: int,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.user_id == user_id).first()
+    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
 
@@ -114,9 +124,10 @@ def delete_asset(
 def download_asset(
     asset_id: int,
     user_id: str = Depends(require_firebase_user),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.user_id == user_id).first()
+    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
 

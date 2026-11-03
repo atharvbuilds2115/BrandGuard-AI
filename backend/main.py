@@ -11,9 +11,29 @@ from .routers.approvals import router as approvals_router
 from .routers.assets import router as assets_router
 from .routers.audits import router as audits_router
 from .routers.dashboard import router as dashboard_router
+from .routers.consistency import router as consistency_router
 from .routers.guidelines import router as guidelines_router
 from .routers.health import router as health_router
+from .routers.profile import router as profile_router
+from .routers.search import router as search_router
+from .routers.video_reviews import router as video_reviews_router
+from .routers.workspaces import router as workspaces_router
 from .services.guideline_service import seed_default_guidelines
+
+
+def _configured_frontend_origins() -> list[str]:
+    origins = [
+        origin.strip()
+        for origin in os.getenv(
+            'FRONTEND_ORIGINS',
+            'http://localhost:5173,http://127.0.0.1:5173',
+        ).split(',')
+        if origin.strip()
+    ]
+    if '*' in origins:
+        raise RuntimeError('FRONTEND_ORIGINS must contain explicit origins, not a wildcard.')
+    return origins
+
 
 app = FastAPI(
     title='BrandGuard AI 2.0 API',
@@ -23,14 +43,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv(
-            'FRONTEND_ORIGINS',
-            'http://localhost:5173,http://127.0.0.1:5173',
-        ).split(',')
-        if origin.strip()
-    ],
+    allow_origins=_configured_frontend_origins(),
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
@@ -38,11 +51,16 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(dashboard_router)
+app.include_router(consistency_router)
 app.include_router(guidelines_router)
 app.include_router(assets_router)
 app.include_router(audits_router)
 app.include_router(approvals_router)
 app.include_router(activity_router)
+app.include_router(profile_router)
+app.include_router(search_router)
+app.include_router(video_reviews_router)
+app.include_router(workspaces_router)
 
 
 @app.on_event('startup')
