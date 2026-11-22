@@ -74,8 +74,35 @@ def test_demo_token_rejects_missing_demo_email(
     response = client.post('/api/auth/demo-token')
 
     assert response.status_code == 503
-    assert response.json() == {'detail': 'Demo sign-in is not configured.'}
+    assert response.json() == {
+        'detail': 'Demo sign-in is not configured. Set DEMO_CREATOR_EMAIL in the backend environment.',
+    }
     get_admin_app.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ('role', 'email_env'),
+    [
+        ('creator', 'DEMO_CREATOR_EMAIL'),
+        ('reviewer', 'DEMO_REVIEWER_EMAIL'),
+        ('agency_partner', 'DEMO_AGENCY_EMAIL'),
+        ('brand_admin', 'DEMO_ADMIN_EMAIL'),
+    ],
+)
+def test_role_demo_token_identifies_missing_configuration_without_logging_secrets(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    role: str,
+    email_env: str,
+) -> None:
+    response = client.post(f'/api/auth/demo-token/{role}')
+
+    assert response.status_code == 503
+    assert response.json() == {
+        'detail': f'Demo sign-in is not configured. Set {email_env} in the backend environment.',
+    }
+    assert f'{email_env} is not set for role {role}' in caplog.text
+    assert '@' not in caplog.text
 
 
 def test_demo_token_rejects_unknown_firebase_account(

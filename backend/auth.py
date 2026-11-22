@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from firebase_admin import auth as firebase_auth
 from firebase_admin import credentials
 from firebase_admin.exceptions import FirebaseError
 
+_LOGGER = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 _app_lock = Lock()
 
@@ -139,9 +141,14 @@ def create_demo_custom_token(role: str = 'creator') -> str:
     if role == 'creator' and not demo_email:
         demo_email = os.getenv('DEMO_ACCOUNT_EMAIL', '').strip()
     if not demo_email:
+        _LOGGER.warning(
+            'Demo sign-in is unavailable: %s is not set for role %s.',
+            role_email_env,
+            role,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail='Demo sign-in is not configured.',
+            detail=f'Demo sign-in is not configured. Set {role_email_env} in the backend environment.',
         )
 
     try:

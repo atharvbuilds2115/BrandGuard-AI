@@ -382,6 +382,12 @@ The repository includes `vercel.json` for SPA route rewriting and `render.yaml` 
 
 In Firebase Authentication, enable Email/Password and Google providers and add the Vercel production/custom domains to **Authorized domains**. For local development, also authorize the local hostname. The four role-specific demo email variables are required for all four demo buttons; the legacy `DEMO_ACCOUNT_EMAIL` setting is retained for older single-account demo setups.
 
+### Production demo login troubleshooting
+
+The demo button calls `POST /api/auth/demo-token/{role}` on `VITE_API_BASE_URL`; it sends the role in the URL and no request body. If the API responds that demo sign-in is not configured, set the matching `DEMO_CREATOR_EMAIL`, `DEMO_REVIEWER_EMAIL`, `DEMO_AGENCY_EMAIL`, or `DEMO_ADMIN_EMAIL` in the Render service's **Environment** settings. Use the exact email for the corresponding enabled Firebase Authentication user, available in Firebase Console under Authentication > Users or in the secure backend environment used to provision the demo accounts. Do not copy passwords or service-account credentials into Vercel. Save the settings and restart/redeploy the Render service. The API response and backend warning identify only the missing variable name and role, never its configured value.
+
+Vercel's `VITE_API_BASE_URL` must be the Render service URL, and `VITE_FIREBASE_PROJECT_ID`, Render's `FIREBASE_PROJECT_ID`, and the Firebase Admin service-account project ID must all refer to the same Firebase project. Vite settings are build-time values, so redeploy Vercel only if its frontend settings change; changing demo email variables requires a Render restart/redeploy.
+
 The deployment uses a distinct database; local records and uploaded files are not automatically migrated. Current local checks do not certify live production authentication or AI analysis.
 
 ## Known limitations and incomplete items
