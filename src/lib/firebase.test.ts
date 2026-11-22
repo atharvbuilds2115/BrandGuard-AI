@@ -127,6 +127,18 @@ describe('Firebase authentication methods', () => {
     );
   });
 
+  it('sends a Firebase password reset email', async () => {
+    mocks.sendPasswordResetEmail.mockResolvedValue(undefined);
+    const firebase = await import('./firebase');
+
+    await expect(firebase.resetPassword('existing@example.test')).resolves.toBeUndefined();
+
+    expect(mocks.sendPasswordResetEmail).toHaveBeenCalledWith(
+      expect.anything(),
+      'existing@example.test',
+    );
+  });
+
   it('signs out the current Firebase user', async () => {
     mocks.signOut.mockResolvedValue(undefined);
     const firebase = await import('./firebase');

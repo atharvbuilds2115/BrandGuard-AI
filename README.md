@@ -348,7 +348,7 @@ git diff --check
 | Check | Result |
 |---|---|
 | Backend automated suite | **154 passed, 1 skipped** |
-| Frontend tests | **5 passed** |
+| Frontend tests | **6 passed** |
 | Frontend lint (`oxlint`) | **Passed** |
 | Frontend TypeScript + production build | **Passed** |
 | Browser demo sign-in / role switch / sign-out | **Passed; all four identities and unique Firebase UIDs were verified** |
