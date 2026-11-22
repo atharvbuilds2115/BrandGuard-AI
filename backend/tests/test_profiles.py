@@ -17,7 +17,7 @@ from backend import auth
 from backend.services import audit_service, gemini_service, groq_service
 from backend.auth import FirebaseIdentity, require_firebase_identity
 from backend.database import Base, get_db
-from backend.models import BrandGuideline
+from backend.models import BrandGuideline, CompanyWorkspace, WorkspaceMembership
 from backend.routers.activity import router as activity_router
 from backend.routers.approvals import router as approvals_router
 from backend.routers.audits import router as audits_router
@@ -39,6 +39,19 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[tuple[TestClient,
     Base.metadata.create_all(engine)
     test_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     identity = {'uid': 'verified-user-a'}
+    with test_session() as db:
+        db.add(CompanyWorkspace(
+            id='legacy-workspace',
+            name='Legacy workspace',
+            personal_owner_uid=identity['uid'],
+        ))
+        db.add(WorkspaceMembership(
+            workspace_id='legacy-workspace',
+            user_id=identity['uid'],
+            role='owner',
+            app_role='brand_admin',
+        ))
+        db.commit()
     app = FastAPI()
     for router in (profile_router, guidelines_router, audits_router, approvals_router, activity_router):
         app.include_router(router)
@@ -313,8 +326,8 @@ def test_profile_seeds_user_guidelines_and_audits_are_isolated(api: tuple[TestCl
         for item in client.get('/api/guidelines').json()
     )
     assert client.get('/api/audits').json() == []
-    assert client.get('/api/approvals/workspace').json() == []
-    assert client.get('/api/activity').json() == []
+    assert client.get('/api/approvals/workspace').status_code == 403
+    assert client.get('/api/activity').status_code == 403
 
 
 def test_protected_profile_requires_bearer_token() -> None:

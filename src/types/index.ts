@@ -81,6 +81,7 @@ export interface Approval {
   status: ApprovalStatus;
   assetCount: number;
   comment?: string;
+  assignedReviewerUid?: string;
 }
 
 export interface ActivityEvent {

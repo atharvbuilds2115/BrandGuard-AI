@@ -33,6 +33,48 @@ class FirebaseIdentity:
     email: str | None
     display_name: str | None
     email_verified: bool = False
+    brandguard_demo: bool = False
+    demo_role: str | None = None
+    app_role: str | None = None
+
+
+DEMO_ROLE_EMAIL_ENV = {
+    'creator': 'DEMO_CREATOR_EMAIL',
+    'reviewer': 'DEMO_REVIEWER_EMAIL',
+    'agency_partner': 'DEMO_AGENCY_EMAIL',
+    'brand_admin': 'DEMO_ADMIN_EMAIL',
+}
+_APP_ROLES = set(DEMO_ROLE_EMAIL_ENV)
+
+
+def is_demo_identity(identity: FirebaseIdentity) -> bool:
+    if identity.brandguard_demo:
+        return True
+    if not identity.email:
+        return False
+    configured_demo_emails = {
+        value.strip().casefold()
+        for value in (
+            os.getenv('DEMO_ACCOUNT_EMAIL', ''),
+            *(os.getenv(name, '') for name in DEMO_ROLE_EMAIL_ENV.values()),
+        )
+        if value.strip()
+    }
+    return identity.email.strip().casefold() in configured_demo_emails
+
+
+def demo_role_for_identity(identity: FirebaseIdentity) -> str:
+    for role in (identity.demo_role, identity.app_role):
+        if role in _APP_ROLES:
+            return role
+    if identity.email:
+        normalized_email = identity.email.strip().casefold()
+        for role, setting in DEMO_ROLE_EMAIL_ENV.items():
+            if normalized_email == os.getenv(setting, '').strip().casefold() and os.getenv(setting, '').strip():
+                return role
+        if normalized_email == os.getenv('DEMO_ACCOUNT_EMAIL', '').strip().casefold() and os.getenv('DEMO_ACCOUNT_EMAIL', '').strip():
+            return 'brand_admin'
+    return 'creator'
 
 
 def _firebase_admin_app() -> firebase_admin.App:
@@ -85,8 +127,17 @@ def _firebase_admin_app() -> firebase_admin.App:
                 ) from error
 
 
-def create_demo_custom_token() -> str:
-    demo_email = os.getenv('DEMO_ACCOUNT_EMAIL', '').strip()
+def create_demo_custom_token(role: str = 'creator') -> str:
+    if role not in DEMO_ROLE_EMAIL_ENV:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='Choose a valid demo role.',
+        )
+
+    role_email_env = DEMO_ROLE_EMAIL_ENV[role]
+    demo_email = os.getenv(role_email_env, '').strip()
+    if role == 'creator' and not demo_email:
+        demo_email = os.getenv('DEMO_ACCOUNT_EMAIL', '').strip()
     if not demo_email:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -123,7 +174,11 @@ def create_demo_custom_token() -> str:
     try:
         token = firebase_auth.create_custom_token(
             user.uid,
-            developer_claims={'brandguard_demo': True},
+            developer_claims={
+                'brandguard_demo': True,
+                'demo_role': role,
+                'app_role': role,
+            },
             app=app,
         )
     except (FirebaseError, DefaultCredentialsError, ValueError) as error:
@@ -218,13 +273,27 @@ def require_firebase_identity(
     email = decoded_token.get('email')
     display_name = decoded_token.get('name')
     email_verified = decoded_token.get('email_verified')
+    brandguard_demo = decoded_token.get('brandguard_demo') is True
+    demo_role = decoded_token.get('demo_role')
+    app_role = decoded_token.get('app_role')
     return FirebaseIdentity(
         uid=user_id,
         email=email if isinstance(email, str) else None,
         display_name=display_name if isinstance(display_name, str) else None,
         email_verified=email_verified is True,
+        brandguard_demo=brandguard_demo,
+        demo_role=demo_role if isinstance(demo_role, str) else None,
+        app_role=app_role if isinstance(app_role, str) else None,
     )
 
 
 def require_firebase_user(identity: FirebaseIdentity = Depends(require_firebase_identity)) -> str:
     return identity.uid
+
+
+def optional_firebase_identity(
+    authorization: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> FirebaseIdentity | None:
+    if authorization is None:
+        return None
+    return require_firebase_identity(authorization)

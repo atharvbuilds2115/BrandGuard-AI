@@ -198,7 +198,7 @@ VITE_FIREBASE_APP_ID=your-firebase-web-app-id
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-Firebase Web configuration is public client configuration. Never place passwords, backend API keys, Firebase Admin credentials, or service-account JSON in a `VITE_*` setting. Demo sign-in uses a server-issued Firebase custom token and the backend-only `DEMO_ACCOUNT_EMAIL` setting.
+Firebase Web configuration is public client configuration. Never place passwords, backend API keys, Firebase Admin credentials, or service-account JSON in a `VITE_*` setting. Demo sign-in uses server-issued Firebase custom tokens; demo account email addresses and passwords belong only in the backend environment.
 
 ### Backend environment (`backend/.env`)
 
@@ -219,10 +219,40 @@ GROQ_VISION_MODEL=your-supported-groq-vision-model
 FIREBASE_PROJECT_ID=your-firebase-project-id
 FIREBASE_SERVICE_ACCOUNT_PATH=C:/secure/path/firebase-admin.json
 FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-DEMO_ACCOUNT_EMAIL=demo-account@example.invalid
+DEMO_CREATOR_EMAIL=creator.demo@your-domain.example
+DEMO_CREATOR_PASSWORD=
+DEMO_REVIEWER_EMAIL=reviewer.demo@your-domain.example
+DEMO_REVIEWER_PASSWORD=
+DEMO_AGENCY_EMAIL=agency.partner.demo@your-domain.example
+DEMO_AGENCY_PASSWORD=
+DEMO_ADMIN_EMAIL=brand.admin.demo@your-domain.example
+DEMO_ADMIN_PASSWORD=
 ```
 
-For local development, Firebase Admin can use Application Default Credentials or a service-account JSON stored **outside the repository**. Set `FIREBASE_PROJECT_ID` to the same Firebase project used by the web app. `DEMO_ACCOUNT_EMAIL` is optional; when configured, it enables demo sign-in for that Firebase account and the separately labeled evaluator sample data. `GEMINI_API_KEY` and `GROQ_API_KEY` must remain in the backend environment; choose provider model IDs supported by the associated API account.
+For local development, Firebase Admin can use Application Default Credentials or a service-account JSON stored **outside the repository**. Set `FIREBASE_PROJECT_ID` to the same Firebase project used by the web app. All four demo email settings are required to enable demo sign-in. `GEMINI_API_KEY` and `GROQ_API_KEY` must remain in the backend environment; choose provider model IDs supported by the associated API account.
+
+### Four-role demo setup
+
+Set all four demo emails and optional passwords in `backend/.env`, then run:
+
+```powershell
+.\backend\.venv\Scripts\python.exe scripts\setup_demo_accounts.py
+```
+
+The setup script creates or updates four distinct Firebase users, assigns trusted `brandguard_demo`, `demo_role`, and `app_role` custom claims through Firebase Admin, and adds each user only to that role's isolated demo workspace. Role sample data is seeded at the first successful login. The Brand Admin Demo has administrator permissions only inside its isolated sample workspace; demo accounts cannot create or modify real workspaces.
+
+```dotenv
+DEMO_CREATOR_EMAIL=creator.demo@your-domain.example
+DEMO_CREATOR_PASSWORD=use-a-strong-secret-from-your-deployment-environment
+DEMO_REVIEWER_EMAIL=reviewer.demo@your-domain.example
+DEMO_REVIEWER_PASSWORD=use-a-strong-secret-from-your-deployment-environment
+DEMO_AGENCY_EMAIL=agency.partner.demo@your-domain.example
+DEMO_AGENCY_PASSWORD=use-a-strong-secret-from-your-deployment-environment
+DEMO_ADMIN_EMAIL=brand.admin.demo@your-domain.example
+DEMO_ADMIN_PASSWORD=use-a-strong-secret-from-your-deployment-environment
+```
+
+If a password is omitted, the setup script generates it and prints it once. Store demo credentials in an environment-specific secret source; do not add passwords or Firebase service-account JSON to frontend files. Each role's login page has a single role-specific demo button; the FastAPI server maps the requested role to its configured Firebase account and creates the custom token. Switching demo roles requests a new server-issued token; it does not change a frontend role value.
 
 ## Start the application
 
@@ -267,16 +297,34 @@ The generated OpenAPI interface at `/docs` is the authoritative endpoint schema 
 
 Firebase Authentication handles identity in the browser. The backend verifies Firebase ID tokens through Firebase Admin, checks the configured project ID, and validates revocation. An unverified UID supplied by the browser is not used as the user identity.
 
-Each account receives a separate personal workspace unless it explicitly joins another workspace. Workspace owners/admins can invite users by email. Invitees must authenticate with that exact verified Firebase email and accept the invitation. Workspace roles are `owner`, `admin`, and `member`; guideline modifications are restricted to owners/admins. Members can view and use approved active guidelines. Application records and guideline queries are scoped to the current workspace, with the verified Firebase UID retained on user-owned records.
+Each new account receives a personal workspace with the `Creator` application role. Workspace application roles are stored per membership as `creator`, `reviewer`, `agency_partner`, or `brand_admin`; they are not read from frontend state or Firebase client claims. An existing Brand Admin can invite or change Creator, Reviewer, and Agency Partner roles. Only a workspace owner can assign Brand Admin. Invitations require the exact verified Firebase email and explicit acceptance.
 
-Existing SQLite migrations are additive and preserve existing records. Existing rows with a known verified owner can be associated with that user's personal workspace; records without a verified owner are not guessed into a workspace.
+Creators can submit and audit campaigns, upload assets, and update findings. Reviewers can view and decide only submissions assigned to them by a Brand Admin. Agency Partners can submit and manage campaign assets in assigned client workspaces. Brand Admins can manage guidelines, workspace settings, users/roles, reports, audit history, reviewer assignments, and approvals. FastAPI checks these capabilities on protected endpoints in addition to verifying the Firebase ID token and workspace membership. A user cannot access another organization by changing the workspace header.
+
+The original membership `owner`/`admin`/`member` field remains for compatibility. On startup, an additive SQLite migration maps existing owners/admins to Brand Admin and existing members to Creator, preserving existing accounts and records. New accounts do not self-assign elevated roles during registration. New workspaces can be created only by an existing Brand Admin.
+
+For a brand-new deployment without a migrated owner, the trusted database operator must bootstrap the first Brand Admin after that Firebase user signs in and receives their personal workspace. For SQLite, run the following against the configured database, substituting the verified Firebase UID:
+
+```sql
+UPDATE workspace_memberships
+SET role = 'owner', app_role = 'brand_admin'
+WHERE user_id = '<verified-firebase-uid>'
+  AND workspace_id = (
+    SELECT id FROM company_workspaces
+    WHERE personal_owner_uid = '<verified-firebase-uid>'
+  );
+```
+
+Keep this operation restricted to trusted database operators. No additional environment variables are required.
+
+Existing SQLite migrations are additive and preserve existing records. Legacy rows with a recorded user ID are associated with that user's personal workspace. When no prior workspace role exists, the membership starts as Creator rather than granting administrator access; records without a recorded user ID are not guessed into a workspace.
 
 ## Security and privacy
 
 - Gemini and Groq API keys are read only by backend services and never belong in frontend code or Vercel `VITE_*` variables.
 - Firebase Admin service-account JSON/credentials belong in a protected backend secret store or outside-repository path.
 - Frontend Firebase Web configuration is public client configuration, not an Admin credential.
-- Backend routes verify Firebase ID tokens and workspace membership; writes use workspace role checks where required.
+- Backend routes verify Firebase ID tokens and workspace membership; role-based permissions are checked server-side for submissions, reviews, approvals, guidelines, workspace settings, and reports.
 - CORS is configured with explicit frontend origins.
 - Guideline uploads are validated by extension, MIME type, signature, and size; document text is treated as untrusted input for the extraction prompt.
 - Asset bytes are kept in a private backend upload directory rather than Firebase Storage. SQL records are workspace-scoped; Firebase Firestore is not used.
@@ -289,21 +337,22 @@ Commands from the repository root:
 
 ```powershell
 .\backend\.venv\Scripts\python.exe -m pytest backend\tests
+npm test
 npm run lint
 npm run build
 git diff --check
 ```
 
-**Verified on 2026-11-03:**
+**Verified on 2026-11-23:**
 
 | Check | Result |
 |---|---|
-| Backend automated suite | **120 passed, 1 skipped** |
+| Backend automated suite | **154 passed, 1 skipped** |
+| Frontend tests | **5 passed** |
 | Frontend lint (`oxlint`) | **Passed** |
 | Frontend TypeScript + production build | **Passed** |
+| Browser demo sign-in / role switch / sign-out | **Passed; all four identities and unique Firebase UIDs were verified** |
 | `git diff --check` | **Passed** |
-| Deployed Vercel frontend HTTP check | **HTTP 200** |
-| Deployed Render health check | **HTTP 200; database reported connected** |
 
 The automated backend suite uses temporary/in-memory SQLite and mocks external provider and Firebase-dependent flows where appropriate. It includes a locally generated MP4 fixture decoded by OpenCV and mocked retry/fallback/quota/error scenarios. The one skipped test is the opt-in live integration test. **No live Gemini/Groq request or end-to-end live Firebase-authenticated analysis was performed**, so provider success and saved/retrieved live AI reviews are not claimed. The frontend build emits a non-blocking large-JavaScript-chunk warning.
 
@@ -315,9 +364,25 @@ To opt into the live integration test, set `BRANDGUARD_RUN_LIVE_INTEGRATION_TEST
 - **Backend (Render):** [https://brandguard-ai-ig4z.onrender.com](https://brandguard-ai-ig4z.onrender.com/)
 - **Repository:** [https://github.com/atharvbuilds2115/BrandGuard-AI](https://github.com/atharvbuilds2115/BrandGuard-AI)
 
-The repository includes `vercel.json` for SPA route rewriting and `render.yaml` for a FastAPI service with persistent disk storage. The Render configuration uses SQLite and a persistent upload directory; keep the service to one instance because SQLite is not a multi-instance database. Set the exact production Vercel origin in Render's `FRONTEND_ORIGINS`, configure Firebase project/admin credentials and the selected server-side AI key in Render, and configure the public Firebase Web settings plus `VITE_API_BASE_URL` in Vercel. Add the deployed hostname to Firebase Authentication's Authorized domains.
+The repository includes `vercel.json` for SPA route rewriting and `render.yaml` for a FastAPI service with persistent disk storage. Keep the Render service to one instance because SQLite is not a multi-instance database.
 
-The deployment uses a distinct database; local records and uploaded files are not automatically migrated. The backend health endpoint and Vercel page were reachable in the check above. No authenticated production workflow or live AI analysis was tested.
+**Vercel frontend**
+
+1. Import the existing GitHub repository and deploy the `main` branch.
+2. Set `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, and `VITE_FIREBASE_APP_ID` to the Firebase Web App values. Set `VITE_API_BASE_URL` to the deployed Render API URL (for example, `https://brandguard-ai-ig4z.onrender.com`).
+3. Configure these values for each Vercel environment you deploy (Production, Preview, and Development as needed), then redeploy so Vite includes them in the build.
+
+**Render FastAPI backend**
+
+1. Deploy using `render.yaml`. It configures SQLite and uploads on the persistent disk; keep one service instance.
+2. In Render, add the Firebase Admin service-account JSON as a secret file at `/etc/secrets/firebase-admin.json`. Set `FIREBASE_PROJECT_ID` to the same Firebase project used by the frontend.
+3. Set `FRONTEND_ORIGINS` to the exact Vercel production origin and any explicitly trusted custom domain. Configure the selected server-side AI provider key (`GEMINI_API_KEY` or `GROQ_API_KEY`) and supported model IDs as needed.
+4. Configure all four demo emails (`DEMO_CREATOR_EMAIL`, `DEMO_REVIEWER_EMAIL`, `DEMO_AGENCY_EMAIL`, `DEMO_ADMIN_EMAIL`) and, if desired, their corresponding password variables. These are backend-only settings; do not put demo credentials in Vercel.
+5. From a secure Render Shell or controlled administrative environment with access to the same service-account credentials and persistent SQLite database, run `python scripts/setup_demo_accounts.py` once. The script is repeatable and refuses to repurpose an existing non-demo Firebase user. Restart/redeploy as needed, then verify `/api/health` and each role's demo login.
+
+In Firebase Authentication, enable Email/Password and Google providers and add the Vercel production/custom domains to **Authorized domains**. For local development, also authorize the local hostname. The four role-specific demo email variables are required for all four demo buttons; the legacy `DEMO_ACCOUNT_EMAIL` setting is retained for older single-account demo setups.
+
+The deployment uses a distinct database; local records and uploaded files are not automatically migrated. Current local checks do not certify live production authentication or AI analysis.
 
 ## Known limitations and incomplete items
 

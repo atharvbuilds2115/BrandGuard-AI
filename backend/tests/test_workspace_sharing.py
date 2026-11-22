@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.auth import FirebaseIdentity, require_firebase_identity
 from backend.database import Base, get_db
+from backend.models import CompanyWorkspace, WorkspaceMembership
 from backend.routers.guidelines import router as guidelines_router
 from backend.routers.workspaces import router as workspaces_router
 
@@ -46,6 +47,19 @@ def test_workspace_invitation_shares_approved_guidelines_only_with_members() -> 
     app.dependency_overrides[require_firebase_identity] = override_identity
 
     try:
+        with test_session() as db:
+            db.add(CompanyWorkspace(
+                id='personal-workspace-owner',
+                name='Personal workspace',
+                personal_owner_uid='workspace-owner',
+            ))
+            db.add(WorkspaceMembership(
+                workspace_id='personal-workspace-owner',
+                user_id='workspace-owner',
+                role='owner',
+                app_role='brand_admin',
+            ))
+            db.commit()
         with TestClient(app) as client:
             personal = client.get('/api/workspaces').json()['workspaces'][0]
             company = client.post('/api/workspaces', json={'name': 'Example Company'}).json()

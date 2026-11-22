@@ -5,7 +5,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -13,9 +13,18 @@ from sqlalchemy.pool import StaticPool
 
 from backend.auth import require_firebase_user
 from backend.database import Base, get_db
-from backend.models import Audit, AuditFinding, BrandGuideline, ConsistencyReport
+from backend.models import (
+    Audit,
+    AuditFinding,
+    BrandGuideline,
+    CompanyWorkspace,
+    ConsistencyReport,
+    WorkspaceMembership,
+)
 from backend.routers.consistency import router as consistency_router
 from backend.services.consistency_service import _issue_area
+from backend.services.workspace_service import WorkspaceAccess, ensure_personal_workspace
+from backend.workspace_auth import require_workspace_access
 
 
 @pytest.fixture
@@ -34,8 +43,26 @@ def api() -> Iterator[tuple[TestClient, dict[str, str], sessionmaker]]:
         finally:
             db.close()
 
+    def override_workspace_access(
+        user_id: str = Depends(require_firebase_user),
+        db: Session = Depends(get_db),
+    ) -> WorkspaceAccess:
+        workspace = ensure_personal_workspace(db, user_id)
+        membership = db.query(WorkspaceMembership).filter_by(
+            workspace_id=workspace.id,
+            user_id=user_id,
+        ).one()
+        membership.app_role = 'brand_admin'
+        return WorkspaceAccess(
+            workspace_id=workspace.id,
+            user_id=user_id,
+            role=membership.role,
+            app_role='brand_admin',
+        )
+
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[require_firebase_user] = lambda: identity['uid']
+    app.dependency_overrides[require_workspace_access] = override_workspace_access
     client = TestClient(app)
     try:
         yield client, identity, test_session

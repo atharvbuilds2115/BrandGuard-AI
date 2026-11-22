@@ -7,7 +7,7 @@ from ..auth import require_firebase_user
 from ..database import get_db
 from ..models import ActivityEvent
 from ..schemas import ActivityCreate, ActivityOut
-from ..services.workspace_service import WorkspaceAccess
+from ..services.workspace_service import WorkspaceAccess, require_app_role
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(prefix='/api', tags=['activity'], dependencies=[Depends(require_workspace_access)])
@@ -40,6 +40,7 @@ def list_activity(
     db: Session = Depends(get_db),
     limit: int = Query(default=25, ge=1, le=100),
 ):
+    require_app_role(access, 'brand_admin')
     events = (
         db.query(ActivityEvent)
         .filter(ActivityEvent.workspace_id == access.workspace_id)

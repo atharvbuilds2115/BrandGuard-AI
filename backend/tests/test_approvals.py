@@ -57,8 +57,18 @@ def api() -> Iterator[tuple[TestClient, dict[str, str], sessionmaker]]:
     db.add_all([
         CompanyWorkspace(id='workspace-a', name='Workspace A'),
         CompanyWorkspace(id='workspace-b', name='Workspace B'),
-        WorkspaceMembership(workspace_id='workspace-a', user_id='reviewer-a', role='owner'),
-        WorkspaceMembership(workspace_id='workspace-b', user_id='reviewer-b', role='member'),
+        WorkspaceMembership(
+            workspace_id='workspace-a',
+            user_id='reviewer-a',
+            role='owner',
+            app_role='brand_admin',
+        ),
+        WorkspaceMembership(
+            workspace_id='workspace-b',
+            user_id='reviewer-b',
+            role='member',
+            app_role='reviewer',
+        ),
     ])
     db.flush()
     audit = Audit(

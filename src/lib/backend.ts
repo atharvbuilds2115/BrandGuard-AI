@@ -38,12 +38,16 @@ export interface ApiWorkspace {
   id: string;
   name: string;
   role: 'owner' | 'admin' | 'member';
+  app_role: ApiAppRole;
 }
+
+export type ApiAppRole = 'creator' | 'reviewer' | 'agency_partner' | 'brand_admin';
 
 export interface ApiWorkspaceMember {
   user_id: string;
   email: string;
   role: 'owner' | 'admin' | 'member';
+  app_role: ApiAppRole;
   created_at: string;
 }
 
@@ -51,6 +55,7 @@ export interface ApiWorkspaceInvitation {
   id: string;
   workspace_name: string;
   role: 'admin' | 'member';
+  app_role: ApiAppRole;
 }
 
 export interface ApiWorkspaceList {
@@ -87,10 +92,22 @@ export async function inviteWorkspaceMember(
   workspaceId: string,
   email: string,
   role: 'member' | 'admin',
+  appRole: ApiAppRole,
 ): Promise<void> {
   await backendRequest(`/api/workspaces/${encodeURIComponent(workspaceId)}/invitations`, {
     method: 'POST',
-    body: JSON.stringify({ email, role }),
+    body: JSON.stringify({ email, role, app_role: appRole }),
+  });
+}
+
+export async function updateWorkspaceMemberRole(
+  workspaceId: string,
+  userId: string,
+  appRole: ApiAppRole,
+): Promise<void> {
+  await backendRequest(`/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}/role`, {
+    method: 'PATCH',
+    body: JSON.stringify({ app_role: appRole }),
   });
 }
 
@@ -189,10 +206,21 @@ export interface ApiApproval {
   decision: string;
   reviewer: string;
   comment: string | null;
+  assigned_reviewer_uid: string | null;
   decision_timestamp: string;
   campaign_name: string;
   risk_level: string;
   asset_count: number;
+}
+
+export async function assignApprovalReviewer(
+  approvalId: number,
+  reviewerUserId: string | null,
+): Promise<ApiApproval> {
+  return backendRequest<ApiApproval>(`/api/approvals/${approvalId}/assignment`, {
+    method: 'PATCH',
+    body: JSON.stringify({ reviewer_user_id: reviewerUserId }),
+  });
 }
 
 export interface ApiActivity {
@@ -389,14 +417,22 @@ export async function publicBackendRequest<T>(path: string, init?: RequestInit):
   return result as T;
 }
 
-export async function requestDemoToken(): Promise<string> {
-  const response = await publicBackendRequest<{ custom_token: string }>('/api/auth/demo-token', {
+export type DemoRole = 'creator' | 'reviewer' | 'agency_partner' | 'brand_admin';
+
+export async function requestDemoToken(role: DemoRole = 'creator'): Promise<string> {
+  const response = await publicBackendRequest<{ custom_token: string }>(`/api/auth/demo-token/${role}`, {
     method: 'POST',
   });
   if (typeof response?.custom_token !== 'string' || !response.custom_token) {
     throw new Error('The API returned an invalid demo sign-in token.');
   }
   return response.custom_token;
+}
+
+export async function resetDemoWorkspace(): Promise<void> {
+  await backendRequest<{ status: string }>('/api/auth/demo-reset', {
+    method: 'POST',
+  });
 }
 
 export function backendErrorMessage(error: unknown): string {

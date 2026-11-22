@@ -17,6 +17,7 @@ import {
   type ApiFinding,
   type ApiGuideline,
   type ApiProfile,
+  type ApiAppRole,
 } from './backend';
 
 export interface BackendWorkspaceData {
@@ -26,6 +27,7 @@ export interface BackendWorkspaceData {
   activity: ActivityEvent[];
   settings: WorkspaceSettings;
   workspaceRole: 'owner' | 'admin' | 'member';
+  appRole: ApiAppRole;
 }
 
 const categoryLabels: Record<string, string> = {
@@ -148,6 +150,7 @@ function mapApproval(item: ApiApproval): Approval {
     status: item.decision as Approval['status'],
     assetCount: item.asset_count,
     comment: item.comment ?? undefined,
+    assignedReviewerUid: item.assigned_reviewer_uid ?? undefined,
   };
 }
 
@@ -165,6 +168,7 @@ function mapActivity(item: ApiActivity): ActivityEvent {
 export async function ensureApplicationProfile(): Promise<{
   profile: ApiProfile;
   workspaceRole: 'owner' | 'admin' | 'member';
+  appRole: ApiAppRole;
 }> {
   const profile = await backendRequest<ApiProfile>('/api/profile');
   const workspaceData = await listWorkspaceData();
@@ -173,7 +177,7 @@ export async function ensureApplicationProfile(): Promise<{
   const selected = workspaces.find((workspace) => workspace.id === storedId) ?? workspaces[0];
   if (!selected) throw new Error('No workspace is available for this account.');
   setActiveWorkspaceId(selected.id);
-  return { profile, workspaceRole: selected.role };
+  return { profile, workspaceRole: selected.role, appRole: selected.app_role };
 }
 
 export async function loadWorkspaceActivity(): Promise<ActivityEvent[]> {
@@ -182,12 +186,14 @@ export async function loadWorkspaceActivity(): Promise<ActivityEvent[]> {
 }
 
 export async function loadWorkspace(): Promise<BackendWorkspaceData> {
-  const { profile, workspaceRole } = await ensureApplicationProfile();
+  const { profile, workspaceRole, appRole } = await ensureApplicationProfile();
   const [guidelineRecords, auditRecords, approvalRecords, activity] = await Promise.all([
     backendRequest<ApiGuideline[]>('/api/guidelines'),
     backendRequest<ApiAudit[]>('/api/audits'),
-    backendRequest<ApiApproval[]>('/api/approvals/workspace'),
-    loadWorkspaceActivity(),
+    ['reviewer', 'brand_admin'].includes(appRole)
+      ? backendRequest<ApiApproval[]>('/api/approvals/workspace')
+      : Promise.resolve([] as ApiApproval[]),
+    appRole === 'brand_admin' ? loadWorkspaceActivity() : Promise.resolve([] as ActivityEvent[]),
   ]);
   const guidelines = guidelineRecords.map(mapApiGuideline);
   const audits = auditRecords.map((item) => mapAudit(item, guidelines));
@@ -198,6 +204,7 @@ export async function loadWorkspace(): Promise<BackendWorkspaceData> {
     activity,
     settings: profile.settings,
     workspaceRole,
+    appRole,
   };
 }
 

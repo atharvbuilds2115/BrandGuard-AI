@@ -1,10 +1,13 @@
 import { useRef, useState, type FormEvent } from 'react';
 import {
   AlertCircle,
+  Building2,
+  ClipboardCheck,
   Eye,
   EyeOff,
   LoaderCircle,
   LockKeyhole,
+  PenTool,
   ShieldCheck,
 } from 'lucide-react';
 import {
@@ -24,8 +27,35 @@ type AuthScreenProps = {
 
 type AuthAction = 'email' | 'google' | 'reset' | 'demo' | null;
 type AuthOperation = 'login' | 'register' | 'google' | 'reset';
+type AuthRole = 'creator' | 'reviewer' | 'agency_partner' | 'brand_admin';
 
 const currentYear = new Date().getFullYear();
+const authRoles = [
+  {
+    id: 'creator' as const,
+    title: 'Creator',
+    description: 'Upload campaign content, run AI audits, and resolve findings.',
+    Icon: PenTool,
+  },
+  {
+    id: 'reviewer' as const,
+    title: 'Reviewer',
+    description: 'Review assigned submissions, comment, and record decisions.',
+    Icon: ClipboardCheck,
+  },
+  {
+    id: 'agency_partner' as const,
+    title: 'Agency Partner',
+    description: 'Coordinate client campaign assets and review status.',
+    Icon: Building2,
+  },
+  {
+    id: 'brand_admin' as const,
+    title: 'Brand Admin',
+    description: 'Manage guidelines, workspace access, and approvals.',
+    Icon: ShieldCheck,
+  },
+];
 
 function friendlyAuthError(error: unknown, operation: AuthOperation): string {
   const code =
@@ -91,6 +121,7 @@ function GoogleMark() {
 
 export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
   const navigate = useNavigate();
+  const [selectedRole, setSelectedRole] = useState<AuthRole | null>(null);
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -166,7 +197,7 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
     }
   };
 
-  const handleDemoLogin = async () => {
+  const handleDemoLogin = async (role: AuthRole = selectedRole ?? 'creator') => {
     setError('');
     setNotice('');
     if (!firebaseReady) {
@@ -178,7 +209,7 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
     actionLock.current = true;
     setAction('demo');
     try {
-      const customToken = await requestDemoToken();
+      const customToken = await requestDemoToken(role);
       const user = await loginWithCustomToken(customToken);
       await user.getIdToken();
       navigate('/dashboard', { replace: true });
@@ -227,6 +258,41 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
 
   return (
     <main className="auth-page">
+      {!selectedRole ? (
+        <section className="auth-role-panel" aria-labelledby="role-heading">
+          <header className="auth-brand">
+            <span className="auth-brand-icon"><ShieldCheck size={23} strokeWidth={2.2} /></span>
+            <span className="auth-brand-name">BRANDGUARD AI</span>
+            <span className="auth-brand-subtitle">Your AI Brand Safety Workspace</span>
+          </header>
+          <div className="auth-heading-block">
+            <span className="auth-eyebrow">WELCOME TO BRANDGUARD</span>
+            <h1 id="role-heading">Choose your workspace role</h1>
+            <p>Select the path that best describes your work. Permissions are assigned and enforced by each workspace administrator.</p>
+          </div>
+          <div className="auth-role-grid">
+            {authRoles.map(({ id, title, description, Icon }) => (
+              <button
+                type="button"
+                key={id}
+                className="auth-role-card"
+                onClick={() => {
+                  setSelectedRole(id);
+                  setMode('login');
+                  setError('');
+                  setNotice('');
+                }}
+              >
+                <span className="auth-role-icon"><Icon size={20} /></span>
+                <span className="auth-role-title">{title}</span>
+                <span className="auth-role-description">{description}</span>
+                <span className="auth-role-continue">Continue <span aria-hidden="true">→</span></span>
+              </button>
+            ))}
+          </div>
+          <p className="auth-role-security"><LockKeyhole size={14} /> Your selection never grants workspace permissions.</p>
+        </section>
+      ) : (
       <section className="auth-card" aria-labelledby="auth-heading">
         <header className="auth-brand">
           <span className="auth-brand-icon"><ShieldCheck size={23} strokeWidth={2.2} /></span>
@@ -234,14 +300,37 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
           <span className="auth-brand-subtitle">Your AI Brand Safety Workspace</span>
         </header>
 
-        <div className="auth-heading-block">
-          <h1 id="auth-heading">{mode === 'login' ? 'Sign in' : 'Create your account'}</h1>
-          <p>
-            {mode === 'login'
-              ? 'Use your email and password to access your workspace.'
-              : 'Get started with your secure brand workspace.'}
-          </p>
+        <div className="auth-heading-block auth-role-heading">
+          <h1 id="auth-heading">
+            {authRoles.find((role) => role.id === selectedRole)?.title}
+          </h1>
         </div>
+        {mode === 'register' && selectedRole !== 'creator' && (
+          <p className="auth-role-notice">
+            New accounts start with Creator access. A workspace administrator must invite you and assign this role.
+          </p>
+        )}
+
+        {mode === 'login' && (
+          <section className="auth-demo-section" aria-labelledby="auth-demo-heading">
+            <div>
+              <span className="auth-demo-eyebrow">DEMO MODE</span>
+              <h2 id="auth-demo-heading">Explore the {authRoles.find((role) => role.id === selectedRole)?.title} workspace</h2>
+              <p>Use a separate demo account with sample data. Your changes stay in the demo workspace.</p>
+            </div>
+            <button
+              type="button"
+              className="auth-demo-button"
+              onClick={() => void handleDemoLogin(selectedRole)}
+              disabled={Boolean(action)}
+            >
+              {action === 'demo' ? <LoaderCircle size={17} className="auth-spinner" /> : null}
+              {action === 'demo'
+                ? 'Connecting to demo…'
+                : `Continue as ${authRoles.find((role) => role.id === selectedRole)?.title ?? 'Creator'} Demo`}
+            </button>
+          </section>
+        )}
 
         {!firebaseReady && (
           <div role="status" className="auth-config-notice">
@@ -276,11 +365,6 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
           <div className="auth-field">
             <div className="auth-label-row">
               <label htmlFor="auth-password">Password</label>
-              {mode === 'login' && (
-                <button type="button" className="auth-text-button" onClick={() => void handlePasswordReset()} disabled={Boolean(action)}>
-                  {action === 'reset' ? 'Sending link…' : 'Forgot password?'}
-                </button>
-              )}
             </div>
             <div className="auth-password-wrap">
               <input
@@ -349,20 +433,28 @@ export default function AuthScreen({ firebaseConfigState }: AuthScreenProps) {
           </button>
         </p>
 
-        {mode === 'login' && firebaseReady && (
+        {mode === 'login' && (
           <button
             type="button"
-            className="auth-demo-button"
-            onClick={() => void handleDemoLogin()}
-            disabled={Boolean(action) || !firebaseReady}
+            className="auth-text-button auth-forgot-button"
+            onClick={() => void handlePasswordReset()}
+            disabled={Boolean(action)}
           >
-            {action === 'demo' ? <LoaderCircle size={17} className="auth-spinner" /> : null}
-            {action === 'demo' ? 'Signing in to demo…' : 'Demo Login'}
+            {action === 'reset' ? 'Sending link…' : 'Forgot password?'}
           </button>
         )}
 
+        <button type="button" className="auth-back-button auth-back-button-bottom" onClick={() => {
+          setSelectedRole(null);
+          setError('');
+          setNotice('');
+        }}>
+          ← Back to role selection
+        </button>
+
         <div className="auth-security-footnote"><LockKeyhole size={14} /> Secure, private access to your workspace</div>
       </section>
+      )}
       <footer className="auth-page-footer">© {currentYear} BrandGuard AI</footer>
     </main>
   );

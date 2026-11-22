@@ -6,13 +6,24 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import FirebaseIdentity, require_firebase_identity
+from ..auth import (
+    FirebaseIdentity,
+    demo_role_for_identity,
+    is_demo_identity,
+    require_firebase_identity,
+)
 from ..database import get_db
 from ..models import BrandGuideline, UserProfile
 from ..schemas import ProfileOut, ProfileSettingsUpdate
 from ..services.guideline_service import DEFAULT_GUIDELINES
 from ..services.demo_workspace import seed_demo_workspace
-from ..services.workspace_service import ensure_personal_workspace
+from ..services.workspace_service import (
+    WorkspaceAccess,
+    ensure_demo_workspace,
+    ensure_personal_workspace,
+    require_workspace_manager,
+)
+from ..workspace_auth import require_workspace_access
 
 router = APIRouter(prefix='/api', tags=['profile'])
 
@@ -85,12 +96,24 @@ def get_profile(
     identity: FirebaseIdentity = Depends(require_firebase_identity),
     db: Session = Depends(get_db),
 ):
-    ensure_personal_workspace(db, identity.uid)
+    is_demo = is_demo_identity(identity)
+    demo_role = demo_role_for_identity(identity) if is_demo else None
+    if is_demo:
+        ensure_demo_workspace(
+            db,
+            identity.uid,
+            demo_role,
+        )
+    else:
+        ensure_personal_workspace(db, identity.uid)
     profile = _get_or_create_profile(db, identity)
-    _create_default_guidelines(db, identity.uid)
-    db.commit()
-    seed_demo_workspace(db, identity.uid, identity.email)
-    ensure_personal_workspace(db, identity.uid)
+    if is_demo:
+        db.commit()
+        seed_demo_workspace(db, identity.uid, identity.email, demo_role)
+    else:
+        _create_default_guidelines(db, identity.uid)
+        db.commit()
+        ensure_personal_workspace(db, identity.uid)
     db.refresh(profile)
     return profile
 
@@ -99,8 +122,10 @@ def get_profile(
 def update_profile_settings(
     payload: ProfileSettingsUpdate,
     identity: FirebaseIdentity = Depends(require_firebase_identity),
+    access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_workspace_manager(access)
     ensure_personal_workspace(db, identity.uid)
     profile = _get_or_create_profile(db, identity)
     profile.settings = payload.settings.model_dump()

@@ -4,9 +4,19 @@ from collections import deque
 from threading import Lock
 from time import monotonic
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.orm import Session
 
-from ..auth import create_demo_custom_token
+from ..auth import (
+    FirebaseIdentity,
+    create_demo_custom_token,
+    is_demo_identity,
+    require_firebase_identity,
+)
+from ..database import get_db
+from ..services.demo_workspace import reset_demo_workspace, seed_demo_workspace
+from ..workspace_auth import require_workspace_access
+from ..services.workspace_service import WorkspaceAccess
 
 router = APIRouter(prefix='/api/auth', tags=['authentication'])
 
@@ -47,3 +57,38 @@ async def issue_demo_token(request: Request, response: Response) -> dict[str, st
     _check_rate_limit(client_key, monotonic())
     response.headers['Cache-Control'] = 'no-store'
     return {'custom_token': create_demo_custom_token()}
+
+
+@router.post('/demo-token/{role}')
+async def issue_role_demo_token(
+    role: str,
+    request: Request,
+    response: Response,
+) -> dict[str, str]:
+    async for chunk in request.stream():
+        if chunk:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='This endpoint does not accept a request body.',
+            )
+
+    client_key = request.client.host if request.client else 'unknown'
+    _check_rate_limit(client_key, monotonic())
+    response.headers['Cache-Control'] = 'no-store'
+    return {'custom_token': create_demo_custom_token(role)}
+
+
+@router.post('/demo-reset')
+def reset_demo(
+    identity: FirebaseIdentity = Depends(require_firebase_identity),
+    access: WorkspaceAccess = Depends(require_workspace_access),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    if not is_demo_identity(identity):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='Only demo accounts can reset demo data.',
+        )
+    reset_demo_workspace(db, access.workspace_id)
+    seed_demo_workspace(db, identity.uid, identity.email, access.app_role)
+    return {'status': 'Demo workspace reset'}

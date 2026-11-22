@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, FormEvent, KeyboardEvent, ReactNode, SetStateAction } from 'react';
-import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import { Navigate, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import type { User } from 'firebase/auth';
 import {
   Area,
@@ -52,11 +52,14 @@ import ConsistencyDashboard from './components/ConsistencyDashboard';
 import GuidelineImportSection from './components/GuidelineImportSection';
 import {
   acceptWorkspaceInvitation,
+  assignApprovalReviewer,
   backendErrorMessage,
   deleteAssetFromBackend,
   listAssetsFromBackend,
   createWorkspace,
   inviteWorkspaceMember,
+  updateWorkspaceMemberRole,
+  type ApiAppRole,
   getStoredWorkspaceId,
   listWorkspaceData,
   listWorkspaceMembers,
@@ -66,6 +69,8 @@ import {
   uploadAssetToBackend,
   listVideoReviews,
   uploadVideoForReview,
+  resetDemoWorkspace,
+  requestDemoToken,
   type ApiGlobalSearchResult,
   type ApiGuideline,
   type ApiWorkspace,
@@ -86,7 +91,13 @@ import {
   updateWorkspaceSettings,
   mapApiGuideline,
 } from './lib/workspace';
-import { firebaseConfigState, firebaseConfigured, listenToAuthState, logout } from './lib/firebase';
+import {
+  firebaseConfigState,
+  firebaseConfigured,
+  listenToAuthState,
+  loginWithCustomToken,
+  logout,
+} from './lib/firebase';
 import type {
   ActivityEvent,
   Approval,
@@ -101,6 +112,12 @@ type ToastState = {
   kind: 'success' | 'error';
   message: string;
 };
+const demoRoleOptions: { role: ApiAppRole; label: string }[] = [
+  { role: 'creator', label: 'Creator Demo' },
+  { role: 'reviewer', label: 'Reviewer Demo' },
+  { role: 'agency_partner', label: 'Agency Partner Demo' },
+  { role: 'brand_admin', label: 'Brand Admin Demo' },
+];
 
 type GlobalSearchItem = {
   category: ApiGlobalSearchResult['category'];
@@ -127,6 +144,13 @@ const navItems = [
   { label: 'Activity History', path: '/activity', Icon: History },
   { label: 'Settings', path: '/settings', Icon: Settings },
 ];
+
+const roleNavigation: Record<ApiAppRole, string[]> = {
+  creator: ['/dashboard', '/assets', '/reviews', '/video-review', '/settings'],
+  reviewer: ['/dashboard', '/assets', '/approvals', '/settings'],
+  agency_partner: ['/dashboard', '/assets', '/reviews', '/video-review', '/settings'],
+  brand_admin: navItems.map((item) => item.path),
+};
 
 function createDemoAuditHistory(): AuditResult[] {
   return [
@@ -201,7 +225,8 @@ function App() {
   const [authLoading, setAuthLoading] = useState(firebaseConfigured);
   const [authError, setAuthError] = useState('');
   const [isEvaluatorDemo, setIsEvaluatorDemo] = useState(false);
-  const [workspaceRole, setWorkspaceRole] = useState<ApiWorkspace['role']>(firebaseConfigured ? 'member' : 'owner');
+  const [appRole, setAppRole] = useState<ApiAppRole>(firebaseConfigured ? 'creator' : 'brand_admin');
+  const [demoRoleSwitching, setDemoRoleSwitching] = useState(false);
   const [loadedWorkspaceKey, setLoadedWorkspaceKey] = useState<string | null>(null);
   const [cloudLoadError, setCloudLoadError] = useState<{ key: string; message: string } | null>(null);
   const [cloudReloadKey, setCloudReloadKey] = useState(0);
@@ -225,7 +250,7 @@ function App() {
     try {
       const unsubscribe = listenToAuthState(
         (user) => {
-          setWorkspaceRole('member');
+          setAppRole('creator');
           setIsEvaluatorDemo(false);
           setAuthUser(user);
           setAuthLoading(false);
@@ -294,7 +319,7 @@ function App() {
       setSettings(workspace.settings);
       setAudits(workspace.audits);
       setAuditResult(workspace.audits[0] ?? null);
-      setWorkspaceRole(workspace.workspaceRole);
+      setAppRole(workspace.appRole);
       setLoadedWorkspaceKey(activeWorkspaceKey);
     }).catch((error: unknown) => {
       if (!active) return;
@@ -510,10 +535,18 @@ function App() {
   };
 
   const resetDemoData = () => {
-    if (firebaseConfigured && !demoMode) {
-      setToast({ kind: 'error', message: 'Reset demo data is only available in local demo mode.' });
+    if (firebaseConfigured && isEvaluatorDemo) {
+      void resetDemoWorkspace()
+        .then(() => {
+          setCloudReloadKey((current) => current + 1);
+          setToast({ kind: 'success', message: 'Demo workspace reset to fresh sample data.' });
+        })
+        .catch((error: unknown) => {
+          setToast({ kind: 'error', message: backendErrorMessage(error) });
+        });
       return;
     }
+    if (firebaseConfigured && !demoMode) return;
     setAssets(demoAssets);
     setGuidelines(demoGuidelines);
     setApprovals(demoApprovals);
@@ -620,6 +653,18 @@ function App() {
     setSettings(next);
   };
 
+  const handleDemoRoleSwitch = async (role: ApiAppRole) => {
+    setDemoRoleSwitching(true);
+    try {
+      const customToken = await requestDemoToken(role);
+      await loginWithCustomToken(customToken);
+    } catch (error) {
+      setToast({ kind: 'error', message: `Demo role could not be changed: ${backendErrorMessage(error)}` });
+    } finally {
+      setDemoRoleSwitching(false);
+    }
+  };
+
   const handleSignOut = async () => {
     try {
       await logout();
@@ -700,10 +745,12 @@ function App() {
       audits={audits}
       authUser={firebaseConfigured && !demoMode ? authUser : null}
       onSignOut={firebaseConfigured && !demoMode ? () => void handleSignOut() : undefined}
+      onSwitchDemoRole={isEvaluatorDemo ? (role) => void handleDemoRoleSwitch(role) : undefined}
+      demoRoleSwitching={demoRoleSwitching}
       demoMode={demoMode}
       isEvaluatorDemo={isEvaluatorDemo}
       firebaseEnabled={firebaseConfigured && !demoMode}
-      workspaceRole={workspaceRole}
+      appRole={appRole}
       onSelectAudit={setAuditResult}
       onFindingStatusChange={handleFindingStatusChange}
       assetLoadError={assetLoadError}
@@ -732,10 +779,12 @@ function AppRouter({
   audits,
   authUser,
   onSignOut,
+  onSwitchDemoRole,
+  demoRoleSwitching,
   demoMode,
   isEvaluatorDemo,
   firebaseEnabled,
-  workspaceRole,
+  appRole,
   onSelectAudit,
   onFindingStatusChange,
   assetLoadError,
@@ -766,10 +815,12 @@ function AppRouter({
   audits: AuditResult[];
   authUser: User | null;
   onSignOut?: () => void;
+  onSwitchDemoRole?: (role: ApiAppRole) => void;
+  demoRoleSwitching: boolean;
   demoMode: boolean;
   isEvaluatorDemo: boolean;
   firebaseEnabled: boolean;
-  workspaceRole: ApiWorkspace['role'];
+  appRole: ApiAppRole;
   onSelectAudit: (audit: AuditResult) => void;
   onFindingStatusChange: (findingId: string, status: AuditResult['findings'][number]['status']) => Promise<void>;
   assetLoadError: string;
@@ -852,7 +903,7 @@ function AppRouter({
           </div>
 
           <nav className="space-y-1">
-            {navItems.map(({ label, path, Icon }) => (
+            {navItems.filter(({ path }) => roleNavigation[appRole].includes(path)).map(({ label, path, Icon }) => (
               <NavLink
                 key={label}
                 to={path}
@@ -895,6 +946,9 @@ function AppRouter({
             onSidebarToggle={() => setSidebarOpen((value) => !value)}
             userEmail={authUser?.email}
             onSignOut={onSignOut}
+            onSwitchDemoRole={onSwitchDemoRole}
+            demoRoleSwitching={demoRoleSwitching}
+            appRole={appRole}
             demoMode={demoMode}
             isEvaluatorDemo={isEvaluatorDemo}
           />
@@ -909,41 +963,38 @@ function AppRouter({
                       : 'Changes are temporary in this browser session and are not saved to Firebase or the backend.'}
                   </p>
                 </div>
-                <span className="w-fit rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide">Demo mode</span>
+                <span className="w-fit rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide">DEMO MODE</span>
               </div>
             )}
             <Routes>
-              <Route
-                path="/"
-                element={<DashboardPage approvals={approvals} activity={activity} dashboardStats={dashboardStats} audits={audits} firebaseEnabled={firebaseEnabled} demoMode={demoMode} />}
-              />
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route
                 path="/dashboard"
-                element={<DashboardPage approvals={approvals} activity={activity} dashboardStats={dashboardStats} audits={audits} firebaseEnabled={firebaseEnabled} demoMode={demoMode} />}
+                element={<DashboardPage appRole={appRole} approvals={approvals} activity={activity} dashboardStats={dashboardStats} audits={audits} firebaseEnabled={firebaseEnabled} demoMode={demoMode} />}
               />
               <Route
                 path="/assets"
-                element={<AssetsPage assets={assets} setAssets={setAssets} onAssetUpload={onAssetUpload} search={search} setSearch={setSearch} assetLoadError={assetLoadError} selectedAssetSearchId={selectedAssetSearchId} onAssetSelectionChange={setSelectedAssetSearchId} />}
+                element={<AssetsPage assets={assets} setAssets={setAssets} onAssetUpload={onAssetUpload} canUploadAssets={['creator', 'agency_partner', 'brand_admin'].includes(appRole)} canManageAssets={['agency_partner', 'brand_admin'].includes(appRole)} search={search} setSearch={setSearch} assetLoadError={assetLoadError} selectedAssetSearchId={selectedAssetSearchId} onAssetSelectionChange={setSelectedAssetSearchId} />}
               />
               <Route
                 path="/guidelines"
-                element={<GuidelinesPage guidelines={guidelines} firebaseEnabled={firebaseEnabled} canManageGuidelines={workspaceRole !== 'member'} onSave={onGuidelineSave} onDelete={onGuidelineDelete} onImportSaved={onGuidelinesImported} selectedSearchId={selectedGuidelineSearchId} />}
+                element={appRole === 'brand_admin' ? <GuidelinesPage guidelines={guidelines} firebaseEnabled={firebaseEnabled} canManageGuidelines onSave={onGuidelineSave} onDelete={onGuidelineDelete} onImportSaved={onGuidelinesImported} selectedSearchId={selectedGuidelineSearchId} /> : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/reviews"
-                element={<CampaignReviewPage isDemoMode={demoMode} onAuditComplete={onAuditComplete} />}
+                element={['creator', 'agency_partner', 'brand_admin'].includes(appRole) ? <CampaignReviewPage isDemoMode={demoMode} onAuditComplete={onAuditComplete} /> : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/video-review"
-                element={<VideoReviewPage firebaseEnabled={firebaseEnabled} />}
+                element={['creator', 'agency_partner', 'brand_admin'].includes(appRole) ? <VideoReviewPage firebaseEnabled={firebaseEnabled} /> : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/consistency"
-                element={<ConsistencyDashboard firebaseEnabled={firebaseEnabled} />}
+                element={appRole === 'brand_admin' ? <ConsistencyDashboard firebaseEnabled={firebaseEnabled} /> : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/results"
-                element={
+                element={roleNavigation[appRole].some((path) => ['/reviews', '/approvals'].includes(path)) ? (
                   <ReviewResultsPage
                     isDemoMode={demoMode}
                     auditResult={auditResult}
@@ -951,19 +1002,19 @@ function AppRouter({
                     onSelectAudit={onSelectAudit}
                     onFindingStatusChange={onFindingStatusChange}
                   />
-                }
+                ) : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/approvals"
-                element={<ApprovalsPage approvals={approvals} onApprovalUpdate={onApprovalUpdate} />}
+                element={['reviewer', 'brand_admin'].includes(appRole) ? <ApprovalsPage appRole={appRole} approvals={approvals} audits={audits} onSelectAudit={onSelectAudit} onApprovalUpdate={onApprovalUpdate} /> : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/activity"
-                element={<ActivityPage activity={activity} />}
+                element={appRole === 'brand_admin' ? <ActivityPage activity={activity} /> : <Navigate to="/dashboard" replace />}
               />
               <Route
                 path="/settings"
-                element={<SettingsPage settings={settings} onChange={onSettingsChange} onResetDemo={onResetDemo} firebaseEnabled={firebaseEnabled} />}
+                element={<SettingsPage settings={settings} onChange={onSettingsChange} onResetDemo={onResetDemo} firebaseEnabled={firebaseEnabled} appRole={appRole} />}
               />
             </Routes>
           </main>
@@ -1005,6 +1056,9 @@ function TopBar({
   onSidebarToggle,
   userEmail,
   onSignOut,
+  onSwitchDemoRole,
+  demoRoleSwitching,
+  appRole,
   demoMode,
   isEvaluatorDemo,
 }: {
@@ -1017,6 +1071,9 @@ function TopBar({
   onSidebarToggle: () => void;
   userEmail?: string | null;
   onSignOut?: () => void;
+  onSwitchDemoRole?: (role: ApiAppRole) => void;
+  demoRoleSwitching: boolean;
+  appRole: ApiAppRole;
   demoMode: boolean;
   isEvaluatorDemo: boolean;
 }) {
@@ -1199,6 +1256,23 @@ function TopBar({
               <div className="text-[11px] text-slate-500">{userEmail ? 'Signed in' : 'Brand lead'}</div>
             </div>
           </div>
+          {isEvaluatorDemo && onSwitchDemoRole && (
+            <label className="rounded-xl border border-amber-200 bg-amber-50 px-2 py-1.5 text-sm text-amber-900">
+              <span className="sr-only">Switch demo role</span>
+              <select
+                aria-label="Switch demo role"
+                value={appRole}
+                disabled={demoRoleSwitching}
+                onChange={(event) => {
+                  const role = demoRoleOptions.find((option) => option.role === event.target.value)?.role;
+                  if (role && role !== appRole) onSwitchDemoRole(role);
+                }}
+                className="max-w-40 bg-transparent font-medium outline-none disabled:opacity-60"
+              >
+                {demoRoleOptions.map(({ role, label }) => <option key={role} value={role}>{label}</option>)}
+              </select>
+            </label>
+          )}
           {isEvaluatorDemo && onSignOut && (
             <button type="button" onClick={onSignOut} className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100" aria-label="Sign out of demo account">
               <LogOut size={16} /><span className="hidden lg:inline">Exit Demo</span>
@@ -1216,6 +1290,7 @@ function TopBar({
 }
 
 function DashboardPage({
+  appRole,
   approvals,
   activity,
   dashboardStats,
@@ -1223,6 +1298,7 @@ function DashboardPage({
   firebaseEnabled,
   demoMode,
 }: {
+  appRole: ApiAppRole;
   approvals: Approval[];
   activity: ActivityEvent[];
   dashboardStats: {
@@ -1238,13 +1314,21 @@ function DashboardPage({
 }) {
   const navigate = useNavigate();
   const usesAuditData = firebaseEnabled || demoMode;
-  const recentReviews = approvals.slice(0, 4).map((item) => ({
-    name: item.campaignName,
-    assets: item.assetCount,
-    riskLevel: item.riskLevel,
-    date: item.submittedAt,
-    status: item.status,
-  }));
+  const recentReviews = ['reviewer', 'brand_admin'].includes(appRole)
+    ? approvals.slice(0, 4).map((item) => ({
+        name: item.campaignName,
+        assets: item.assetCount,
+        riskLevel: item.riskLevel,
+        date: item.submittedAt,
+        status: item.status,
+      }))
+    : audits.slice(0, 4).map((item) => ({
+        name: item.campaignName,
+        assets: 0,
+        riskLevel: item.riskLevel,
+        date: item.createdAt,
+        status: 'pending',
+      }));
   const displayedRiskData = firebaseEnabled || demoMode
     ? ([
         { name: 'Low', value: audits.filter((audit) => audit.riskLevel === 'Low').length, color: '#22c55e' },
@@ -1292,22 +1376,41 @@ function DashboardPage({
       accent: 'bg-red-100 text-red-700',
     },
   ];
+  const visibleSummaryCards = summaryCards.filter(({ label }) => {
+    if (appRole === 'creator') return label !== 'Pending Approvals';
+    if (appRole === 'reviewer') return label !== 'Total Assets';
+    if (appRole === 'agency_partner') return label !== 'Pending Approvals';
+    return true;
+  });
+  const dashboardTitle: Record<ApiAppRole, string> = {
+    creator: 'Your campaign audit workspace.',
+    reviewer: 'Your review queue and decisions.',
+    agency_partner: 'Your client campaign workspaces.',
+    brand_admin: 'Your brand and workspace overview.',
+  };
+  const canSubmit = ['creator', 'agency_partner', 'brand_admin'].includes(appRole);
 
   return (
     <div className="space-y-6">
       <header className="flex flex-col gap-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="text-sm font-medium uppercase tracking-[0.2em] text-slate-500">{demoMode ? 'Sample dashboard' : 'Good morning'}</p>
-          <h1 className="mt-2 text-3xl font-semibold text-slate-900">Here’s your brand safety overview.</h1>
+          <p className="text-sm font-medium uppercase tracking-[0.2em] text-slate-500">{demoMode ? 'Sample dashboard' : appRole.replace('_', ' ')}</p>
+          <h1 className="mt-2 text-3xl font-semibold text-slate-900">{dashboardTitle[appRole]}</h1>
         </div>
         <div className="flex gap-3">
-          <button type="button" onClick={() => navigate('/reviews')} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-blue-200 transition hover:bg-blue-500">Review Campaign</button>
-          <button type="button" onClick={() => navigate('/assets')} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50">Upload Assets</button>
+          {canSubmit ? (
+            <>
+              <button type="button" onClick={() => navigate('/reviews')} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-blue-200 transition hover:bg-blue-500">Review Campaign</button>
+              <button type="button" onClick={() => navigate('/assets')} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50">Upload Assets</button>
+            </>
+          ) : (
+            <button type="button" onClick={() => navigate('/approvals')} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-blue-200 transition hover:bg-blue-500">Open review queue</button>
+          )}
         </div>
       </header>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {summaryCards.map(({ label, value, description, icon: Icon, accent }) => (
+        {visibleSummaryCards.map(({ label, value, description, icon: Icon, accent }) => (
           <StatCard key={label} label={label} value={value} description={description} accent={accent} icon={Icon} />
         ))}
       </section>
@@ -1426,9 +1529,15 @@ function DashboardPage({
           </div>
 
           <div className="mt-6 space-y-3">
-            <button type="button" onClick={() => navigate('/assets')} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white"><Upload size={16} /> Upload asset</button>
-            <button type="button" onClick={() => navigate('/guidelines')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700"><PenSquare size={16} /> Edit guidelines</button>
-            <button type="button" onClick={() => navigate('/reviews')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700"><FileText size={16} /> Start review</button>
+            {canSubmit ? (
+              <>
+                <button type="button" onClick={() => navigate('/assets')} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white"><Upload size={16} /> Upload asset</button>
+                {appRole === 'brand_admin' && <button type="button" onClick={() => navigate('/guidelines')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700"><PenSquare size={16} /> Edit guidelines</button>}
+                <button type="button" onClick={() => navigate('/reviews')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700"><FileText size={16} /> Start review</button>
+              </>
+            ) : (
+              <button type="button" onClick={() => navigate('/approvals')} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white"><CheckCheck size={16} /> Review submissions</button>
+            )}
           </div>
         </aside>
       </section>
@@ -1440,6 +1549,8 @@ function AssetsPage({
   assets,
   setAssets,
   onAssetUpload,
+  canUploadAssets,
+  canManageAssets,
   search,
   setSearch,
   assetLoadError,
@@ -1449,6 +1560,8 @@ function AssetsPage({
   assets: Asset[];
   setAssets: Dispatch<SetStateAction<Asset[]>>;
   onAssetUpload: (file: File) => void | Promise<void>;
+  canUploadAssets: boolean;
+  canManageAssets: boolean;
   search: string;
   setSearch: (value: string) => void;
   assetLoadError: string;
@@ -1520,7 +1633,7 @@ function AssetsPage({
           <h1 className="text-3xl font-semibold text-slate-900">Asset Library</h1>
           <p className="text-sm text-slate-500">{filteredAssets.length} total assets</p>
         </div>
-        <div className="flex gap-3">
+        {canUploadAssets && <div className="flex gap-3">
           <button type="button" disabled={isUploading} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-medium text-slate-700 disabled:opacity-60" onClick={() => fileInputRef.current?.click()}>
             <Upload size={16} /> {isUploading ? 'Uploading…' : 'Upload'}
           </button>
@@ -1529,7 +1642,7 @@ function AssetsPage({
             if (file) void uploadSelectedFile(file);
             event.target.value = '';
           }} />
-        </div>
+        </div>}
       </div>
 
       {assetLoadError && <p role="alert" className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{assetLoadError}</p>}
@@ -1637,14 +1750,14 @@ function AssetsPage({
                 {selectedAsset.tags.map((tag) => (
                   <span key={tag} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
                     #{tag}
-                    <button type="button" onClick={() => removeTag(tag)} className="text-slate-400 hover:text-slate-900"><X size={12} /></button>
+                  {canManageAssets && <button type="button" onClick={() => removeTag(tag)} className="text-slate-400 hover:text-slate-900"><X size={12} /></button>}
                   </span>
                 ))}
               </div>
-              <div className="mt-3 flex gap-2">
+              {canManageAssets && <div className="mt-3 flex gap-2">
                 <input value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} placeholder="Add tag" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-300" />
                 <button type="button" onClick={addTag} className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white">Add</button>
-              </div>
+              </div>}
             </div>
           </div>
         </div>
@@ -2408,15 +2521,34 @@ function ReviewResultsPage({
   );
 }
 
-function ApprovalsPage({ approvals, onApprovalUpdate }: {
+function ApprovalsPage({ appRole, approvals, audits, onSelectAudit, onApprovalUpdate }: {
+  appRole: ApiAppRole;
   approvals: Approval[];
+  audits: AuditResult[];
+  onSelectAudit: (audit: AuditResult) => void;
   onApprovalUpdate: (id: string, status: Approval['status'], comment?: string) => Promise<boolean>;
 }) {
+  const navigate = useNavigate();
   const [tab, setTab] = useState<'All' | 'Pending' | 'Approved' | 'Rejected' | 'Changes requested'>('All');
   const [query, setQuery] = useState('');
   const [selectedApproval, setSelectedApproval] = useState<Approval | null>(null);
   const [comment, setComment] = useState('');
   const [savingApprovalId, setSavingApprovalId] = useState<string | null>(null);
+  const [reviewers, setReviewers] = useState<ApiWorkspaceMember[]>([]);
+  const [assignedReviewerIds, setAssignedReviewerIds] = useState<Record<string, string>>({});
+  const [assignmentError, setAssignmentError] = useState('');
+
+  useEffect(() => {
+    if (appRole !== 'brand_admin') return;
+    const workspaceId = getStoredWorkspaceId();
+    if (!workspaceId) return;
+    void listWorkspaceMembers(workspaceId).then((members) => {
+      setReviewers(members.filter((member) => member.app_role === 'reviewer'));
+      setAssignmentError('');
+    }).catch((error: unknown) => {
+      setAssignmentError(backendErrorMessage(error));
+    });
+  }, [appRole]);
 
   const filtered = approvals.filter((approval) => {
     const matchesTab = tab === 'All' ||
@@ -2436,6 +2568,16 @@ function ApprovalsPage({ approvals, onApprovalUpdate }: {
       }
     } finally {
       setSavingApprovalId(null);
+    }
+  };
+
+  const assignReviewer = async (approval: Approval, reviewerUserId: string) => {
+    setAssignmentError('');
+    try {
+      await assignApprovalReviewer(Number(approval.id), reviewerUserId || null);
+      setAssignedReviewerIds((current) => ({ ...current, [approval.id]: reviewerUserId }));
+    } catch (error) {
+      setAssignmentError(backendErrorMessage(error));
     }
   };
 
@@ -2463,6 +2605,7 @@ function ApprovalsPage({ approvals, onApprovalUpdate }: {
       </div>
 
       <div className="space-y-3">
+        {assignmentError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{assignmentError}</p>}
         {filtered.length === 0 && (
           <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-8 text-center">
             <h2 className="font-semibold text-slate-900">No approvals to show</h2>
@@ -2482,6 +2625,35 @@ function ApprovalsPage({ approvals, onApprovalUpdate }: {
               </div>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
+              {appRole === 'brand_admin' && (
+                <label className="flex items-center gap-2 text-sm text-slate-600">
+                  Assign reviewer
+                  <select
+                    aria-label={`Assign reviewer for ${approval.campaignName}`}
+                    value={assignedReviewerIds[approval.id] ?? approval.assignedReviewerUid ?? ''}
+                    onChange={(event) => void assignReviewer(approval, event.target.value)}
+                    className="rounded-lg border border-slate-200 bg-white px-2 py-2"
+                  >
+                    <option value="">Unassigned</option>
+                    {reviewers.map((reviewer) => (
+                      <option key={reviewer.user_id} value={reviewer.user_id}>{reviewer.email || reviewer.user_id}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <button
+                type="button"
+                disabled={!audits.some((audit) => audit.id === approval.auditId)}
+                className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 disabled:opacity-50"
+                onClick={() => {
+                  const audit = audits.find((item) => item.id === approval.auditId);
+                  if (!audit) return;
+                  onSelectAudit(audit);
+                  navigate('/results');
+                }}
+              >
+                Review findings
+              </button>
               <button type="button" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700" onClick={() => setSelectedApproval(approval)}>Inspect</button>
               {approval.status === 'pending' && <>
                 <button type="button" disabled={savingApprovalId !== null} className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void updateApproval(approval, 'approved')}>Approve</button>
@@ -2560,11 +2732,12 @@ function WorkspaceSharingSection() {
   const [selectedId, setSelectedId] = useState(() => getStoredWorkspaceId() ?? '');
   const [workspaceName, setWorkspaceName] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<'member' | 'admin'>('member');
+  const [inviteAppRole, setInviteAppRole] = useState<ApiAppRole>('creator');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const selected = workspaces.find((item) => item.id === selectedId);
+  const canManage = selected?.app_role === 'brand_admin';
 
   const refresh = async (preferredId?: string) => {
     const workspaceData = await listWorkspaceData();
@@ -2573,7 +2746,9 @@ function WorkspaceSharingSection() {
     setWorkspaces(items);
     const activeId = preferredId ?? items.find((item) => item.id === selectedId)?.id ?? items[0]?.id ?? '';
     setSelectedId(activeId);
-    if (activeId) setMembers(await listWorkspaceMembers(activeId));
+    const active = items.find((item) => item.id === activeId);
+    if (active?.app_role === 'brand_admin') setMembers(await listWorkspaceMembers(activeId));
+    else setMembers([]);
   };
 
   useEffect(() => {
@@ -2587,9 +2762,11 @@ function WorkspaceSharingSection() {
         setWorkspaces(items);
         setInvitations(workspaceData.pending_invitations);
         setSelectedId(selectedWorkspace?.id ?? '');
-        if (selectedWorkspace) {
+        if (selectedWorkspace?.app_role === 'brand_admin') {
           const workspaceMembers = await listWorkspaceMembers(selectedWorkspace.id);
           if (active) setMembers(workspaceMembers);
+        } else {
+          setMembers([]);
         }
       } catch (loadError) {
         if (active) setError(backendErrorMessage(loadError));
@@ -2625,15 +2802,31 @@ function WorkspaceSharingSection() {
 
   const submitInvite = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!selected || !['owner', 'admin'].includes(selected.role)) return;
+    if (!selected || !canManage) return;
     setBusy(true);
     setError('');
     try {
-      await inviteWorkspaceMember(selected.id, inviteEmail, inviteRole);
+      const membershipRole = inviteAppRole === 'brand_admin' ? 'admin' : 'member';
+      await inviteWorkspaceMember(selected.id, inviteEmail, membershipRole, inviteAppRole);
       setInviteEmail('');
       setNotice('Invitation recorded. The recipient must sign in with this verified email to join.');
     } catch (inviteError) {
       setError(backendErrorMessage(inviteError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changeMemberRole = async (member: ApiWorkspaceMember, appRole: ApiAppRole) => {
+    if (!selected || !canManage) return;
+    setBusy(true);
+    setError('');
+    try {
+      await updateWorkspaceMemberRole(selected.id, member.user_id, appRole);
+      await refresh(selected.id);
+      setNotice('Workspace role updated.');
+    } catch (roleError) {
+      setError(backendErrorMessage(roleError));
     } finally {
       setBusy(false);
     }
@@ -2687,7 +2880,7 @@ function WorkspaceSharingSection() {
           className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm"
         >
           {workspaces.map((workspace) => (
-            <option value={workspace.id} key={workspace.id}>{workspace.name} · {workspace.role}</option>
+            <option value={workspace.id} key={workspace.id}>{workspace.name} · {workspace.app_role.replace('_', ' ')}</option>
           ))}
         </select>
       </div>
@@ -2696,14 +2889,28 @@ function WorkspaceSharingSection() {
           <h3 className="text-sm font-semibold text-slate-800">Members</h3>
           <ul className="mt-2 space-y-2 text-sm text-slate-600">
             {members.map((member) => (
-              <li key={member.user_id} className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
-                <span>{member.email || member.user_id}</span><span className="capitalize">{member.role}</span>
+              <li key={member.user_id} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2">
+                <span className="min-w-0 truncate">{member.email || member.user_id}</span>
+                {canManage ? (
+                  <select
+                    aria-label={`Role for ${member.email || member.user_id}`}
+                    value={member.app_role}
+                    disabled={busy || member.role === 'owner'}
+                    onChange={(event) => void changeMemberRole(member, event.target.value as ApiAppRole)}
+                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs capitalize"
+                  >
+                    <option value="creator">Creator</option>
+                    <option value="reviewer">Reviewer</option>
+                    <option value="agency_partner">Agency Partner</option>
+                    {selected?.role === 'owner' && <option value="brand_admin">Brand Admin</option>}
+                  </select>
+                ) : <span className="capitalize">{member.app_role.replace('_', ' ')}</span>}
               </li>
             ))}
           </ul>
         </div>
       )}
-      {selected && ['owner', 'admin'].includes(selected.role) && (
+      {selected && canManage && (
         <form onSubmit={submitInvite} className="mt-5 grid gap-3 sm:grid-cols-[1fr_auto_auto]">
           <input
             type="email"
@@ -2716,17 +2923,19 @@ function WorkspaceSharingSection() {
           />
           <select
             aria-label="Invitation role"
-            value={inviteRole}
-            onChange={(event) => setInviteRole(event.target.value as 'member' | 'admin')}
+            value={inviteAppRole}
+            onChange={(event) => setInviteAppRole(event.target.value as ApiAppRole)}
             className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
           >
-            <option value="member">Member</option>
-            {selected.role === 'owner' && <option value="admin">Admin</option>}
+            <option value="creator">Creator</option>
+            <option value="reviewer">Reviewer</option>
+            <option value="agency_partner">Agency Partner</option>
+            {selected.role === 'owner' && <option value="brand_admin">Brand Admin</option>}
           </select>
           <button disabled={busy} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">Invite</button>
         </form>
       )}
-      <form onSubmit={submitCreate} className="mt-5 flex gap-3">
+      {canManage && <form onSubmit={submitCreate} className="mt-5 flex gap-3">
         <input
           required
           minLength={2}
@@ -2738,7 +2947,7 @@ function WorkspaceSharingSection() {
           className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
         />
         <button disabled={busy} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 disabled:opacity-50">Create workspace</button>
-      </form>
+      </form>}
     </section>
   );
 }
@@ -2748,11 +2957,13 @@ function SettingsPage({
   onChange,
   onResetDemo,
   firebaseEnabled,
+  appRole,
 }: {
   settings: WorkspaceSettings;
   onChange: (next: WorkspaceSettings) => void;
   onResetDemo: () => void;
   firebaseEnabled: boolean;
+  appRole: ApiAppRole;
 }) {
   const [form, setForm] = useState(settings);
 
@@ -2765,6 +2976,13 @@ function SettingsPage({
   return (
     <div className="space-y-6">
       {firebaseEnabled && <WorkspaceSharingSection />}
+      {appRole === 'agency_partner' && (
+        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h1 className="text-xl font-semibold text-slate-900">Client workspaces</h1>
+          <p className="mt-1 text-sm text-slate-600">Switch between workspaces assigned to your agency or accept a verified invitation above.</p>
+        </div>
+      )}
+      {appRole === 'brand_admin' && <>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-semibold text-slate-900">Settings</h1>
@@ -2824,6 +3042,7 @@ function SettingsPage({
           </div>
         </div>
       </div>
+      </>}
     </div>
   );
 }

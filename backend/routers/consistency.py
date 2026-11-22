@@ -8,7 +8,7 @@ from ..database import get_db
 from ..models import ActivityEvent, ConsistencyReport
 from ..schemas import ConsistencyReportCreate, ConsistencyReportOut
 from ..services.consistency_service import build_consistency_report
-from ..services.workspace_service import WorkspaceAccess
+from ..services.workspace_service import WorkspaceAccess, require_app_role
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(
@@ -25,6 +25,7 @@ def create_consistency_report(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'brand_admin')
     try:
         report_data = build_consistency_report(db, user_id, payload.audit_ids, access.workspace_id)
     except ValueError as error:
@@ -58,6 +59,7 @@ def list_consistency_reports(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'brand_admin')
     return db.query(ConsistencyReport).filter(
         ConsistencyReport.workspace_id == access.workspace_id,
     ).order_by(ConsistencyReport.created_at.desc()).limit(100).all()
@@ -69,6 +71,7 @@ def get_consistency_report(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'brand_admin')
     report = db.query(ConsistencyReport).filter(
         ConsistencyReport.id == report_id,
         ConsistencyReport.workspace_id == access.workspace_id,

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..auth import require_firebase_user
 from ..database import get_db
 from ..models import ActivityEvent, Approval, Asset, Audit, AuditFinding, BrandGuideline
-from ..services.workspace_service import WorkspaceAccess
+from ..services.workspace_service import WorkspaceAccess, require_app_role
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(prefix='/api', tags=['dashboard'], dependencies=[Depends(require_workspace_access)])
@@ -22,15 +22,31 @@ def dashboard_stats(
     db: Session = Depends(get_db),
 ):
     total_assets = db.query(Asset).filter(Asset.workspace_id == access.workspace_id).count()
-    total_audits = db.query(Audit).filter(Audit.workspace_id == access.workspace_id).count()
-    pending_approvals = db.query(Approval).filter(
+    audit_query = db.query(Audit).filter(Audit.workspace_id == access.workspace_id)
+    if access.app_role == 'reviewer':
+        assigned_audit_ids = db.query(Approval.audit_id).filter(
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        )
+        audit_query = audit_query.filter(Audit.id.in_(assigned_audit_ids))
+    total_audits = audit_query.count()
+    approvals_query = db.query(Approval).filter(
         Approval.workspace_id == access.workspace_id,
         Approval.decision.ilike('pending'),
-    ).count()
-    high_risk_findings = db.query(AuditFinding).filter(
+    )
+    if access.app_role == 'reviewer':
+        approvals_query = approvals_query.filter(Approval.assigned_reviewer_uid == access.user_id)
+    pending_approvals = approvals_query.count()
+    findings_query = db.query(AuditFinding).join(
+        Audit,
+        Audit.id == AuditFinding.audit_id,
+    ).filter(
         AuditFinding.workspace_id == access.workspace_id,
         AuditFinding.severity.ilike('high'),
-    ).count()
+    )
+    if access.app_role == 'reviewer':
+        findings_query = findings_query.filter(Audit.id.in_(assigned_audit_ids))
+    high_risk_findings = findings_query.count()
     total_guidelines = db.query(BrandGuideline).filter(BrandGuideline.workspace_id == access.workspace_id).count()
 
     return {
@@ -49,6 +65,7 @@ def recent_activity(
     db: Session = Depends(get_db),
     limit: int = 5,
 ):
+    require_app_role(access, 'brand_admin')
     activity = (
         db.query(ActivityEvent)
         .filter(ActivityEvent.workspace_id == access.workspace_id)
@@ -74,12 +91,17 @@ def risk_distribution(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    counts = (
+    query = (
         db.query(Audit.risk_category, func.count(Audit.id))
         .filter(Audit.workspace_id == access.workspace_id)
-        .group_by(Audit.risk_category)
-        .all()
     )
+    if access.app_role == 'reviewer':
+        assigned_audit_ids = db.query(Approval.audit_id).filter(
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        )
+        query = query.filter(Audit.id.in_(assigned_audit_ids))
+    counts = query.group_by(Audit.risk_category).all()
     result = {'low': 0, 'medium': 0, 'high': 0}
     for key, value in counts:
         if key in result:

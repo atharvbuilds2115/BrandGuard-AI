@@ -18,6 +18,7 @@ from ..models import (
 )
 from .asset_service import get_upload_directory
 from .consistency_service import build_consistency_report
+from .workspace_service import APP_ROLES, DEMO_WORKSPACE_IDS
 
 
 _DEMO_CAMPAIGN_NAMES = (
@@ -26,10 +27,28 @@ _DEMO_CAMPAIGN_NAMES = (
 )
 
 
-def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
-    configured_email = os.getenv('DEMO_ACCOUNT_EMAIL', '').strip().casefold()
-    if not configured_email or not email or email.strip().casefold() != configured_email:
+def seed_demo_workspace(
+    db: Session,
+    uid: str,
+    email: str | None,
+    app_role: str = 'creator',
+) -> None:
+    configured_emails = {
+        os.getenv(name, '').strip().casefold()
+        for name in (
+            'DEMO_CREATOR_EMAIL',
+            'DEMO_REVIEWER_EMAIL',
+            'DEMO_AGENCY_EMAIL',
+            'DEMO_ADMIN_EMAIL',
+            'DEMO_ACCOUNT_EMAIL',
+        )
+        if os.getenv(name, '').strip()
+    }
+    if not email or email.strip().casefold() not in configured_emails:
         return
+    if app_role not in APP_ROLES:
+        raise ValueError('The demo account does not have a valid workspace role.')
+    workspace_id = DEMO_WORKSPACE_IDS[app_role]
 
     seeded = db.query(Audit.id).filter(
         Audit.user_id == uid,
@@ -39,11 +58,22 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
         return
 
     guideline = db.query(BrandGuideline).filter(
-        BrandGuideline.user_id == uid,
+        BrandGuideline.workspace_id == workspace_id,
         BrandGuideline.rule_name == 'Prohibited phrase',
     ).order_by(BrandGuideline.id.asc()).first()
     if not guideline:
-        raise RuntimeError('The demo workspace requires its default prohibited-phrase guideline.')
+        guideline = BrandGuideline(
+            rule_name='Prohibited phrase',
+            category='Claims',
+            description='Demonstration prohibited phrase guideline.',
+            rule_value='Guaranteed',
+            severity='high',
+            active=True,
+            user_id=uid,
+            workspace_id=workspace_id,
+        )
+        db.add(guideline)
+        db.flush()
 
     now = datetime.utcnow()
     audits = [
@@ -57,6 +87,7 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
             analysis_mode='rules_only',
             created_at=now - timedelta(days=offset),
             user_id=uid,
+            workspace_id=workspace_id,
         )
         for name, campaign_type, content, risk_score, offset in (
             (
@@ -93,6 +124,7 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
             suggested_correction='Replace this demonstration claim with substantiated, factual language.',
             finding_status='confirmed',
             user_id=uid,
+            workspace_id=workspace_id,
         ))
         db.add(Approval(
             audit_id=audit.id,
@@ -101,6 +133,8 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
             comment='Demonstration approval record; not a real campaign decision.',
             decision_timestamp=audit.created_at,
             user_id=uid,
+            workspace_id=workspace_id,
+            assigned_reviewer_uid=uid if app_role == 'reviewer' else None,
         ))
         db.add(ActivityEvent(
             event_type='Demo sample campaign audit',
@@ -108,6 +142,7 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
             related_entity_id=str(audit.id),
             timestamp=audit.created_at,
             user_id=uid,
+            workspace_id=workspace_id,
         ))
 
     upload_directory = get_upload_directory()
@@ -123,6 +158,7 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
         review_status='approved',
         file_path=str(upload_directory / 'demo-sample-metadata-only.png'),
         user_id=uid,
+        workspace_id=workspace_id,
     ))
 
     db.add(VideoReview(
@@ -148,6 +184,7 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
         }],
         created_at=now - timedelta(days=1),
         user_id=uid,
+        workspace_id=workspace_id,
     ))
 
     db.flush()
@@ -162,6 +199,7 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
         report_data=report_data,
         created_at=now - timedelta(days=1),
         user_id=uid,
+        workspace_id=workspace_id,
     ))
     db.add(ActivityEvent(
         event_type='Demo sample workspace initialized',
@@ -169,5 +207,26 @@ def seed_demo_workspace(db: Session, uid: str, email: str | None) -> None:
         related_entity_id=None,
         timestamp=now,
         user_id=uid,
+        workspace_id=workspace_id,
     ))
+    db.commit()
+
+
+def reset_demo_workspace(db: Session, workspace_id: str) -> None:
+    if workspace_id not in DEMO_WORKSPACE_IDS.values():
+        raise ValueError('The workspace is not an isolated demo workspace.')
+    demo_models = (
+        AuditFinding,
+        Approval,
+        Asset,
+        Audit,
+        BrandGuideline,
+        ConsistencyReport,
+        VideoReview,
+        ActivityEvent,
+    )
+    for model in demo_models:
+        db.query(model).filter(model.workspace_id == workspace_id).delete(
+            synchronize_session=False
+        )
     db.commit()

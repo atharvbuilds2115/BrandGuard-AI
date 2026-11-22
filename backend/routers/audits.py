@@ -9,7 +9,7 @@ from ..models import ActivityEvent, Approval, Audit, AuditFinding
 from ..schemas import AuditCreate, AuditOut
 from ..services.audit_service import run_audit_engine
 from ..services.gemini_service import GeminiAnalysisError
-from ..services.workspace_service import WorkspaceAccess
+from ..services.workspace_service import WorkspaceAccess, require_app_role
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(prefix='/api', tags=['audits'], dependencies=[Depends(require_workspace_access)])
@@ -22,6 +22,7 @@ def create_audit(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'agency_partner', 'brand_admin')
     try:
         score, risk_category, findings, analysis_mode = run_audit_engine(
             payload.campaign_name,
@@ -95,7 +96,14 @@ def list_audits(
     risk_category: str | None = Query(default=None),
     status: str | None = Query(default=None),
 ):
+    require_app_role(access, 'creator', 'reviewer', 'agency_partner', 'brand_admin')
     query = db.query(Audit).filter(Audit.workspace_id == access.workspace_id)
+    if access.app_role == 'reviewer':
+        assigned_audit_ids = db.query(Approval.audit_id).filter(
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        )
+        query = query.filter(Audit.id.in_(assigned_audit_ids))
     if risk_category:
         query = query.filter(Audit.risk_category.ilike(risk_category))
     if status:
@@ -109,7 +117,16 @@ def get_audit(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'reviewer', 'agency_partner', 'brand_admin')
     audit = db.query(Audit).filter(Audit.id == audit_id, Audit.workspace_id == access.workspace_id).first()
+    if audit and access.app_role == 'reviewer':
+        assigned = db.query(Approval.id).filter(
+            Approval.audit_id == audit.id,
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        ).first()
+        if assigned is None:
+            audit = None
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
     return audit
@@ -122,10 +139,19 @@ def rerun_audit(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'agency_partner', 'brand_admin')
     audit = db.query(Audit).filter(
         Audit.id == audit_id,
         Audit.workspace_id == access.workspace_id,
     ).first()
+    if audit and access.app_role == 'reviewer':
+        assigned = db.query(Approval.id).filter(
+            Approval.audit_id == audit.id,
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        ).first()
+        if assigned is None:
+            audit = None
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
 
@@ -185,10 +211,19 @@ def update_finding_status(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'reviewer', 'brand_admin')
     audit = db.query(Audit).filter(
         Audit.id == audit_id,
         Audit.workspace_id == access.workspace_id,
     ).first()
+    if audit and access.app_role == 'reviewer':
+        assigned = db.query(Approval.id).filter(
+            Approval.audit_id == audit.id,
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        ).first()
+        if assigned is None:
+            audit = None
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
 

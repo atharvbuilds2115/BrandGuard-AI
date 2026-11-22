@@ -11,7 +11,7 @@ from ..database import get_db
 from ..models import Asset
 from ..schemas import AssetOut, AssetUpdate
 from ..services.asset_service import MAX_UPLOAD_SIZE_BYTES, get_upload_directory, persist_asset
-from ..services.workspace_service import WorkspaceAccess
+from ..services.workspace_service import WorkspaceAccess, require_app_role, require_mutation_allowed
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(prefix='/api', tags=['assets'], dependencies=[Depends(require_workspace_access)])
@@ -27,6 +27,7 @@ def list_assets(
     status: str | None = None,
     sort: str = 'newest',
 ):
+    require_app_role(access, 'creator', 'reviewer', 'agency_partner', 'brand_admin')
     query = db.query(Asset).filter(Asset.workspace_id == access.workspace_id)
     if q:
         like = f'%{q}%'
@@ -53,6 +54,7 @@ def get_asset(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'reviewer', 'agency_partner', 'brand_admin')
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
@@ -67,6 +69,7 @@ async def upload_asset(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'agency_partner', 'brand_admin')
     content = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
     try:
         asset = persist_asset(db, file, content, campaign_name, user_id)
@@ -86,6 +89,7 @@ def update_asset(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'agency_partner', 'brand_admin')
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
@@ -105,6 +109,8 @@ def delete_asset(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_mutation_allowed(access)
+    require_app_role(access, 'agency_partner', 'brand_admin')
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')
@@ -127,6 +133,7 @@ def download_asset(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'reviewer', 'agency_partner', 'brand_admin')
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.workspace_id == access.workspace_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail='Asset not found')

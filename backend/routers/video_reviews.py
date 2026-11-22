@@ -12,7 +12,7 @@ from ..services import video_service
 from ..services.ai_provider import GeminiAnalysisError
 from ..services.ai_provider import get_active_ai_provider
 from ..services.ai_service import analyze_video_frames_with_model
-from ..services.workspace_service import WorkspaceAccess
+from ..services.workspace_service import WorkspaceAccess, require_app_role
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(
@@ -29,6 +29,7 @@ async def create_video_review(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'agency_partner', 'brand_admin')
     content = await file.read(video_service.MAX_VIDEO_SIZE_BYTES + 1)
     if len(content) > video_service.MAX_VIDEO_SIZE_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail='The video exceeds the 50 MB upload limit.')
@@ -86,6 +87,7 @@ def list_video_reviews(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'agency_partner', 'brand_admin')
     return db.query(VideoReview).filter(
         VideoReview.workspace_id == access.workspace_id,
     ).order_by(VideoReview.created_at.desc()).limit(100).all()
@@ -97,6 +99,7 @@ def get_video_review(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'creator', 'agency_partner', 'brand_admin')
     review = db.query(VideoReview).filter(
         VideoReview.id == review_id,
         VideoReview.workspace_id == access.workspace_id,

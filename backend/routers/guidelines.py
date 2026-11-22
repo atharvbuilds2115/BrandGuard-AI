@@ -26,7 +26,7 @@ from ..services.guideline_import_service import (
     GuidelineDocumentError,
     extract_guideline_document,
 )
-from ..services.workspace_service import WorkspaceAccess, require_workspace_manager
+from ..services.workspace_service import WorkspaceAccess, require_mutation_allowed, require_workspace_manager
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(
@@ -216,11 +216,10 @@ def list_guideline_import_documents(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_workspace_manager(access)
     document_query = db.query(GuidelineDocument).filter(
         GuidelineDocument.workspace_id == access.workspace_id,
     )
-    if access.role == 'member':
-        document_query = document_query.filter(GuidelineDocument.status == 'approved')
     documents = document_query.order_by(GuidelineDocument.created_at.desc()).all()
     return [
         {
@@ -243,6 +242,7 @@ def list_guideline_history(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_workspace_manager(access)
     history = db.query(GuidelineHistory).filter(
         GuidelineHistory.workspace_id == access.workspace_id,
     ).order_by(GuidelineHistory.created_at.desc()).limit(100).all()
@@ -268,7 +268,7 @@ def list_guidelines(
     active: bool | None = Query(default=None),
 ):
     query = db.query(BrandGuideline).filter(BrandGuideline.workspace_id == access.workspace_id)
-    if access.role == 'member':
+    if access.app_role != 'brand_admin':
         query = query.filter(BrandGuideline.active.is_(True))
     if category:
         query = query.filter(BrandGuideline.category.ilike(category))
@@ -320,7 +320,7 @@ def get_guideline(
         BrandGuideline.id == guideline_id,
         BrandGuideline.workspace_id == access.workspace_id,
     ).first()
-    if guideline and access.role == 'member' and not guideline.active:
+    if guideline and access.app_role != 'brand_admin' and not guideline.active:
         guideline = None
     if not guideline:
         raise HTTPException(status_code=404, detail='Guideline not found')
@@ -370,6 +370,7 @@ def delete_guideline(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_mutation_allowed(access)
     require_workspace_manager(access)
     guideline = db.query(BrandGuideline).filter(
         BrandGuideline.id == guideline_id,

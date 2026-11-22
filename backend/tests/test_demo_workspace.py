@@ -19,6 +19,7 @@ from backend.routers.consistency import router as consistency_router
 from backend.routers.guidelines import router as guidelines_router
 from backend.routers.profile import router as profile_router
 from backend.routers.video_reviews import router as video_reviews_router
+from backend.services.workspace_service import resolve_workspace_access
 
 
 @pytest.fixture
@@ -50,6 +51,7 @@ def api(
         finally:
             db.close()
 
+
     def override_identity() -> FirebaseIdentity:
         return FirebaseIdentity(
             uid=identity['uid'],
@@ -66,6 +68,25 @@ def api(
         client.close()
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_each_demo_role_is_assigned_a_distinct_workspace(
+    api: tuple[TestClient, dict[str, str], sessionmaker],
+) -> None:
+    _client, _identity, test_session = api
+    with test_session() as db:
+        workspaces = {
+            role: resolve_workspace_access(
+                db,
+                f'{role}-demo-user',
+                None,
+                demo=True,
+                demo_role=role,
+            ).workspace_id
+            for role in ('creator', 'reviewer', 'agency_partner', 'brand_admin')
+        }
+
+    assert len(set(workspaces.values())) == 4
 
 
 def test_demo_profile_seeds_labeled_workspace_once(
@@ -130,8 +151,14 @@ def test_demo_seed_only_runs_for_configured_email_and_uid(
     assert client.get('/api/audits').json() == []
     assert client.get('/api/assets').json() == []
     assert client.get('/api/video-reviews').json() == []
-    assert client.get('/api/consistency-reports').json() == []
-    assert client.get('/api/approvals/workspace').json() == []
+    consistency = client.get('/api/consistency-reports')
+    assert consistency.status_code in (403, 200)
+    if consistency.status_code == 200:
+        assert consistency.json() == []
+    approvals = client.get('/api/approvals/workspace')
+    assert approvals.status_code in (403, 200)
+    if approvals.status_code == 200:
+        assert approvals.json() == []
 
 
 def test_evaluator_sample_records_are_not_visible_to_other_uids(
@@ -146,6 +173,15 @@ def test_evaluator_sample_records_are_not_visible_to_other_uids(
     assert client.get('/api/audits').json() == []
     assert client.get('/api/assets').json() == []
     assert client.get('/api/video-reviews').json() == []
-    assert client.get('/api/consistency-reports').json() == []
-    assert client.get('/api/approvals/workspace').json() == []
-    assert client.get('/api/activity').json() == []
+    consistency = client.get('/api/consistency-reports')
+    assert consistency.status_code in (403, 200)
+    if consistency.status_code == 200:
+        assert consistency.json() == []
+    approvals = client.get('/api/approvals/workspace')
+    assert approvals.status_code in (403, 200)
+    if approvals.status_code == 200:
+        assert approvals.json() == []
+    activity = client.get('/api/activity')
+    assert activity.status_code in (403, 200)
+    if activity.status_code == 200:
+        assert activity.json() == []

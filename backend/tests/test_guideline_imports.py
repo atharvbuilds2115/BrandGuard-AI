@@ -6,7 +6,7 @@ from collections.abc import Iterator
 import fitz
 import pytest
 from docx import Document
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,12 +15,19 @@ from sqlalchemy.pool import StaticPool
 from backend.auth import require_firebase_user
 from backend import database as backend_database
 from backend.database import Base, get_db
-from backend.models import Audit, AuditFinding, BrandGuideline
+from backend.models import (
+    Audit,
+    AuditFinding,
+    BrandGuideline,
+    WorkspaceMembership,
+)
 from backend.routers import guidelines as guideline_router_module
 from backend.routers.guidelines import router as guidelines_router
 from backend.services import ai_service, guideline_import_service
 from backend.services.audit_service import run_audit_engine
 from backend.services.consistency_service import build_consistency_report
+from backend.services.workspace_service import WorkspaceAccess, ensure_personal_workspace
+from backend.workspace_auth import require_workspace_access
 
 
 @pytest.fixture
@@ -52,8 +59,26 @@ def api(
         finally:
             db.close()
 
+    def override_workspace_access(
+        user_id: str = Depends(require_firebase_user),
+        db: Session = Depends(get_db),
+    ) -> WorkspaceAccess:
+        workspace = ensure_personal_workspace(db, user_id)
+        membership = db.query(WorkspaceMembership).filter_by(
+            workspace_id=workspace.id,
+            user_id=user_id,
+        ).one()
+        membership.app_role = 'brand_admin'
+        return WorkspaceAccess(
+            workspace_id=workspace.id,
+            user_id=user_id,
+            role=membership.role,
+            app_role='brand_admin',
+        )
+
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[require_firebase_user] = lambda: identity['uid']
+    app.dependency_overrides[require_workspace_access] = override_workspace_access
     client = TestClient(app)
     try:
         yield client, identity
@@ -471,13 +496,13 @@ def test_additive_guideline_migration_preserves_existing_database_rows(
             "SELECT rule_name, rule_value, requirement_type, source_document_id, workspace_id "
             "FROM brand_guidelines WHERE id=7"
         )).one()
-        membership_count = connection.execute(text(
-            "SELECT COUNT(*) FROM workspace_memberships WHERE user_id='legacy-user' AND role='owner'"
-        )).scalar_one()
+        membership = connection.execute(text(
+            "SELECT role, app_role FROM workspace_memberships WHERE user_id='legacy-user'"
+        )).one()
     guideline_columns = {column['name'] for column in inspect(engine).get_columns('brand_guidelines')}
     assert tuple(existing[:4]) == ('Old rule', 'Keep existing data', 'guidance', None)
     assert existing[4]
-    assert membership_count == 1
+    assert tuple(membership) == ('member', 'creator')
     assert {'source_document_id', 'source_reference', 'source_excerpt', 'requirement_type'} <= guideline_columns
     assert inspect(engine).has_table('guideline_documents')
     engine.dispose()

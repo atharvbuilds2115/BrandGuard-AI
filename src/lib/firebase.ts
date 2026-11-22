@@ -69,6 +69,7 @@ export async function loginWithCustomToken(customToken: string): Promise<User> {
 
 export async function loginWithGoogle(): Promise<User> {
   const firebaseAuth = requireAuth();
+  await setPersistence(firebaseAuth, browserLocalPersistence);
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
   const credential = await signInWithPopup(firebaseAuth, provider);

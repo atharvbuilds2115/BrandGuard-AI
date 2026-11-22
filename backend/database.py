@@ -21,6 +21,7 @@ def init_db() -> None:
     from . import models
 
     models.Base.metadata.create_all(bind=engine)
+    _migrate_workspace_roles(engine)
     user_owned_tables = (
         'brand_guidelines',
         'guideline_documents',
@@ -45,6 +46,16 @@ def init_db() -> None:
             if table_name == 'audits' and 'analysis_mode' not in columns:
                 connection.execute(
                     text("ALTER TABLE audits ADD COLUMN analysis_mode VARCHAR(32) NOT NULL DEFAULT 'rules_only'")
+                )
+            if table_name == 'approvals' and 'assigned_reviewer_uid' not in columns:
+                connection.execute(
+                    text('ALTER TABLE approvals ADD COLUMN assigned_reviewer_uid VARCHAR(128)')
+                )
+                connection.execute(
+                    text(
+                        'CREATE INDEX IF NOT EXISTS ix_approvals_assigned_reviewer_uid '
+                        'ON approvals (assigned_reviewer_uid)'
+                    )
                 )
             if table_name == 'video_reviews':
                 if 'risk_score' not in columns:
@@ -84,6 +95,27 @@ def init_db() -> None:
     _backfill_personal_workspaces(user_owned_tables, engine)
 
 
+def _migrate_workspace_roles(target_engine) -> None:
+    inspector = inspect(target_engine)
+    membership_columns = {column['name'] for column in inspector.get_columns('workspace_memberships')}
+    invitation_columns = {column['name'] for column in inspector.get_columns('workspace_invitations')}
+    with target_engine.begin() as connection:
+        if 'app_role' not in membership_columns:
+            connection.execute(
+                text("ALTER TABLE workspace_memberships ADD COLUMN app_role VARCHAR(24) NOT NULL DEFAULT 'creator'")
+            )
+            connection.execute(
+                text("UPDATE workspace_memberships SET app_role = 'brand_admin' WHERE role IN ('owner', 'admin')")
+            )
+        if 'app_role' not in invitation_columns:
+            connection.execute(
+                text("ALTER TABLE workspace_invitations ADD COLUMN app_role VARCHAR(24) NOT NULL DEFAULT 'creator'")
+            )
+            connection.execute(
+                text("UPDATE workspace_invitations SET app_role = 'brand_admin' WHERE role = 'admin'")
+            )
+
+
 def _backfill_personal_workspaces(user_owned_tables: tuple[str, ...], target_engine) -> None:
     from uuid import uuid4
 
@@ -119,7 +151,8 @@ def _backfill_personal_workspaces(user_owned_tables: tuple[str, ...], target_eng
                 db.add(WorkspaceMembership(
                     workspace_id=workspace.id,
                     user_id=user_id,
-                    role='owner',
+                    role='member',
+                    app_role='creator',
                 ))
             for table_name in user_owned_tables:
                 db.execute(

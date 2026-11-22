@@ -231,6 +231,10 @@ class ApprovalUpdate(BaseModel):
     comment: Optional[str] = None
 
 
+class ApprovalAssignment(BaseModel):
+    reviewer_user_id: Optional[str] = None
+
+
 class ApprovalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -239,6 +243,7 @@ class ApprovalOut(BaseModel):
     decision: str
     reviewer: str
     comment: Optional[str]
+    assigned_reviewer_uid: Optional[str] = None
     decision_timestamp: datetime
 
 

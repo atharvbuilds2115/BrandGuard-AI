@@ -42,6 +42,7 @@ class WorkspaceMembership(Base):
     )
     user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     role: Mapped[str] = mapped_column(String(16), nullable=False, default='member')
+    app_role: Mapped[str] = mapped_column(String(24), nullable=False, default='creator')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
@@ -52,6 +53,7 @@ class WorkspaceInvitation(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey('company_workspaces.id'), nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(254), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(16), nullable=False, default='member')
+    app_role: Mapped[str] = mapped_column(String(24), nullable=False, default='creator')
     invited_by: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default='pending')
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -233,6 +235,7 @@ class Approval(Base):
     decision: Mapped[str] = mapped_column(String(20), nullable=False)
     reviewer: Mapped[str] = mapped_column(String(80), nullable=False)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    assigned_reviewer_uid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     decision_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     workspace_id: Mapped[Optional[str]] = mapped_column(

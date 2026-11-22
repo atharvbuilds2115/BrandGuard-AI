@@ -31,3 +31,19 @@ services:
         sync: false
       - key: DEMO_ACCOUNT_EMAIL
         sync: false
+      - key: DEMO_CREATOR_EMAIL
+        sync: false
+      - key: DEMO_CREATOR_PASSWORD
+        sync: false
+      - key: DEMO_REVIEWER_EMAIL
+        sync: false
+      - key: DEMO_REVIEWER_PASSWORD
+        sync: false
+      - key: DEMO_AGENCY_EMAIL
+        sync: false
+      - key: DEMO_AGENCY_PASSWORD
+        sync: false
+      - key: DEMO_ADMIN_EMAIL
+        sync: false
+      - key: DEMO_ADMIN_PASSWORD
+        sync: false

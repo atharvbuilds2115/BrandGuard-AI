@@ -13,6 +13,17 @@ from backend import auth
 from backend.routers import demo_auth
 
 
+@pytest.fixture(autouse=True)
+def clear_role_demo_emails(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        'DEMO_CREATOR_EMAIL',
+        'DEMO_REVIEWER_EMAIL',
+        'DEMO_AGENCY_EMAIL',
+        'DEMO_ADMIN_EMAIL',
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     app = FastAPI()
@@ -43,7 +54,11 @@ def test_demo_token_uses_configured_account_and_returns_custom_token(
     get_user.assert_called_once_with('demo@example.test', app=admin_app)
     create_token.assert_called_once_with(
         'configured-demo-uid',
-        developer_claims={'brandguard_demo': True},
+        developer_claims={
+            'brandguard_demo': True,
+            'demo_role': 'creator',
+            'app_role': 'creator',
+        },
         app=admin_app,
     )
 
@@ -149,3 +164,46 @@ def test_demo_token_endpoint_limits_requests_per_client(
     assert responses[-1].json() == {
         'detail': 'Too many demo sign-in requests. Please try again shortly.',
     }
+
+
+@pytest.mark.parametrize(
+    'role',
+    ['creator', 'reviewer', 'agency_partner', 'brand_admin'],
+)
+def test_role_demo_token_uses_server_role_account(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+) -> None:
+    email_env = {
+        'creator': 'DEMO_CREATOR_EMAIL',
+        'reviewer': 'DEMO_REVIEWER_EMAIL',
+        'agency_partner': 'DEMO_AGENCY_EMAIL',
+        'brand_admin': 'DEMO_ADMIN_EMAIL',
+    }[role]
+    monkeypatch.setenv(email_env, f'{role}@example.test')
+    admin_app = object()
+    monkeypatch.setattr(auth, '_firebase_admin_app', lambda: admin_app)
+    monkeypatch.setattr(
+        firebase_auth,
+        'get_user_by_email',
+        Mock(return_value=SimpleNamespace(uid=f'{role}-uid', disabled=False)),
+    )
+    monkeypatch.setattr(
+        firebase_auth,
+        'create_custom_token',
+        Mock(return_value=b'synthetic-token'),
+    )
+
+    response = client.post(f'/api/auth/demo-token/{role}')
+
+    assert response.status_code == 200
+    firebase_auth.create_custom_token.assert_called_with(
+        f'{role}-uid',
+        developer_claims={
+            'brandguard_demo': True,
+            'demo_role': role,
+            'app_role': role,
+        },
+        app=admin_app,
+    )

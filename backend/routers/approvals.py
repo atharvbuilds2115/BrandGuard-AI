@@ -8,9 +8,9 @@ from sqlalchemy.orm import Session
 
 from ..auth import require_firebase_user
 from ..database import get_db
-from ..models import ActivityEvent, Approval, Audit
-from ..schemas import ApprovalCreate, ApprovalOut, ApprovalUpdate, ApprovalWorkspaceOut
-from ..services.workspace_service import WorkspaceAccess
+from ..models import ActivityEvent, Approval, Audit, WorkspaceMembership
+from ..schemas import ApprovalAssignment, ApprovalCreate, ApprovalOut, ApprovalUpdate, ApprovalWorkspaceOut
+from ..services.workspace_service import WorkspaceAccess, require_app_role
 from ..workspace_auth import require_workspace_access
 
 router = APIRouter(prefix='/api', tags=['approvals'], dependencies=[Depends(require_workspace_access)])
@@ -24,6 +24,11 @@ def _apply_decision(
     access: WorkspaceAccess,
     db: Session,
 ) -> Approval:
+    if access.app_role == 'reviewer' and approval.assigned_reviewer_uid != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='This approval is not assigned to you.',
+        )
     audit = db.query(Audit).filter(
         Audit.id == approval.audit_id,
         Audit.workspace_id == access.workspace_id,
@@ -85,12 +90,11 @@ def list_approvals(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    return (
-        db.query(Approval)
-        .filter(Approval.workspace_id == access.workspace_id)
-        .order_by(Approval.decision_timestamp.desc())
-        .all()
-    )
+    require_app_role(access, 'reviewer', 'brand_admin')
+    query = db.query(Approval).filter(Approval.workspace_id == access.workspace_id)
+    if access.app_role == 'reviewer':
+        query = query.filter(Approval.assigned_reviewer_uid == access.user_id)
+    return query.order_by(Approval.decision_timestamp.desc()).all()
 
 
 @router.get('/approvals/workspace', response_model=list[ApprovalWorkspaceOut])
@@ -98,13 +102,15 @@ def list_workspace_approvals(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
-    records = (
+    require_app_role(access, 'reviewer', 'brand_admin')
+    query = (
         db.query(Approval, Audit)
         .join(Audit, Audit.id == Approval.audit_id)
         .filter(Approval.workspace_id == access.workspace_id, Audit.workspace_id == access.workspace_id)
-        .order_by(Approval.decision_timestamp.desc())
-        .all()
     )
+    if access.app_role == 'reviewer':
+        query = query.filter(Approval.assigned_reviewer_uid == access.user_id)
+    records = query.order_by(Approval.decision_timestamp.desc()).all()
     return [
         {
             'id': approval.id,
@@ -113,6 +119,7 @@ def list_workspace_approvals(
             'reviewer': approval.reviewer,
             'comment': approval.comment,
             'decision_timestamp': approval.decision_timestamp,
+            'assigned_reviewer_uid': approval.assigned_reviewer_uid,
             'campaign_name': audit.campaign_name,
             'risk_level': audit.risk_category,
             'asset_count': 0,
@@ -129,6 +136,7 @@ def update_approval(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'reviewer', 'brand_admin')
     approval = db.query(Approval).filter(
         Approval.id == approval_id,
         Approval.workspace_id == access.workspace_id,
@@ -139,6 +147,37 @@ def update_approval(
     return _apply_decision(approval, payload.decision, payload.comment, user_id, access, db)
 
 
+@router.patch('/approvals/{approval_id}/assignment', response_model=ApprovalOut)
+def assign_approval(
+    approval_id: int,
+    payload: ApprovalAssignment,
+    access: WorkspaceAccess = Depends(require_workspace_access),
+    db: Session = Depends(get_db),
+):
+    require_app_role(access, 'brand_admin')
+    approval = db.query(Approval).filter(
+        Approval.id == approval_id,
+        Approval.workspace_id == access.workspace_id,
+    ).first()
+    if approval is None:
+        raise HTTPException(status_code=404, detail='Approval not found.')
+    if payload.reviewer_user_id is not None:
+        reviewer = db.query(WorkspaceMembership).filter(
+            WorkspaceMembership.workspace_id == access.workspace_id,
+            WorkspaceMembership.user_id == payload.reviewer_user_id,
+            WorkspaceMembership.app_role == 'reviewer',
+        ).first()
+        if reviewer is None:
+            raise HTTPException(
+                status_code=422,
+                detail='Choose a Reviewer who belongs to this workspace.',
+            )
+    approval.assigned_reviewer_uid = payload.reviewer_user_id
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
 @router.post('/audits/{audit_id}/approve', response_model=ApprovalOut)
 def approve_audit(
     audit_id: int,
@@ -147,6 +186,7 @@ def approve_audit(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'reviewer', 'brand_admin')
     audit = db.query(Audit).filter(Audit.id == audit_id, Audit.workspace_id == access.workspace_id).first()
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
@@ -168,6 +208,7 @@ def reject_audit(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'reviewer', 'brand_admin')
     audit = db.query(Audit).filter(Audit.id == audit_id, Audit.workspace_id == access.workspace_id).first()
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')
@@ -189,6 +230,7 @@ def request_changes(
     access: WorkspaceAccess = Depends(require_workspace_access),
     db: Session = Depends(get_db),
 ):
+    require_app_role(access, 'reviewer', 'brand_admin')
     audit = db.query(Audit).filter(Audit.id == audit_id, Audit.workspace_id == access.workspace_id).first()
     if not audit:
         raise HTTPException(status_code=404, detail='Audit not found')

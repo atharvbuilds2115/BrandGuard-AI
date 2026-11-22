@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import require_firebase_user
 from ..database import get_db
-from ..models import Asset, Audit, BrandGuideline
+from ..models import Approval, Asset, Audit, BrandGuideline
 from ..schemas import GlobalSearchResultOut
 from ..services.workspace_service import WorkspaceAccess
 from ..workspace_auth import require_workspace_access
@@ -45,9 +45,14 @@ def search_workspace(
             ),
         )
         .order_by(Audit.created_at.desc(), Audit.id.desc())
-        .limit(_RESULTS_PER_CATEGORY)
-        .all()
     )
+    if access.app_role == 'reviewer':
+        assigned_audits = db.query(Approval.audit_id).filter(
+            Approval.workspace_id == access.workspace_id,
+            Approval.assigned_reviewer_uid == access.user_id,
+        )
+        audits = audits.filter(Audit.id.in_(assigned_audits))
+    audits = audits.limit(_RESULTS_PER_CATEGORY).all()
     assets = (
         db.query(Asset)
         .filter(
