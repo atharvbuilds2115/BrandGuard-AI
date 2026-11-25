@@ -99,6 +99,35 @@ def _fake_frames(count: int) -> list[dict[str, object]]:
     ]
 
 
+def _valid_video_finding() -> dict[str, object]:
+    return {
+        'timestamp_seconds': 0.0,
+        'title': 'Logo proportions differ from the approved example',
+        'severity': 'medium',
+        'category': 'logo',
+        'evidence': 'The visible logo is stretched horizontally.',
+        'explanation': 'The logo proportions differ from the supplied guideline.',
+        'suggested_correction': 'Use the approved logo asset without stretching.',
+    }
+
+
+def _json_validate_failed_error(failed_generation: str = 'malformed output') -> APIStatusError:
+    request = httpx.Request('POST', 'https://api.groq.com/openai/v1/chat/completions')
+    response = httpx.Response(
+        400,
+        json={
+            'error': {
+                'message': "Failed to generate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+                'type': 'json_validate_failed',
+                'code': 'json_validate_failed',
+                'failed_generation': failed_generation,
+            },
+        },
+        request=request,
+    )
+    return APIStatusError('HTTP 400', response=response, body=response.json())
+
+
 def test_provider_defaults_to_gemini_and_accepts_explicit_groq(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,10 +250,104 @@ def test_groq_image_analysis_uses_data_url_and_json_mode(
     assert findings == []
     assert model == 'qwen/qwen3.8-27b'
     assert fallback_used is False
-    assert requests[0]['response_format'] == {'type': 'json_object'}
+    assert requests[0]['response_format']['type'] == 'json_schema'
+    assert requests[0]['response_format']['json_schema']['strict'] is True
+    schema = requests[0]['response_format']['json_schema']['schema']
+    assert schema['required'] == ['findings']
+    assert schema['additionalProperties'] is False
     assert content[1]['type'] == 'text'
     assert content[2]['type'] == 'image_url'
     assert content[2]['image_url']['url'].startswith('data:image/jpeg;base64,')
+    prompt = requests[0]['messages'][0]['content']
+    assert 'no Markdown fences, preamble, or text outside' in prompt
+    assert '"suggested_correction"' in prompt
+    assert '{"findings":[]}' in prompt
+
+
+@pytest.mark.parametrize(
+    'invalid_response',
+    [
+        lambda valid: f"```json\n{valid}\n```",
+        lambda valid: f'Here is the requested review:\n{valid}',
+        lambda _valid: '{"findings":[{"timestamp_seconds":0}]}',
+        lambda _valid: (
+            '{"findings":[{"timestamp_seconds":"0","title":"Issue","severity":"medium",'
+            '"category":"logo","evidence":"Visible evidence","explanation":"Reason",'
+            '"suggested_correction":"Correction"}]}'
+        ),
+    ],
+    ids=['markdown-fences', 'extra-text', 'missing-fields', 'incorrect-types'],
+)
+def test_groq_video_repairs_malformed_or_schema_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_response: Callable[[str], str],
+) -> None:
+    valid_response = json.dumps({'findings': [_valid_video_finding()]})
+    requests = _mock_groq(
+        monkeypatch,
+        lambda _request, count: _completion(
+            invalid_response(valid_response) if count == 1 else valid_response
+        ),
+    )
+
+    findings, model = groq_service.analyze_video_frames(_fake_frames(1), [])
+
+    assert model == 'qwen/qwen3.8-27b'
+    assert len(findings) == 1
+    assert findings[0]['title'] == _valid_video_finding()['title']
+    assert len(requests) == 2
+    repaired_content = requests[1]['messages'][1]['content']
+    assert repaired_content[-1]['type'] == 'text'
+    assert 'Return only one JSON object' in repaired_content[-1]['text']
+    assert requests[0]['response_format']['type'] == 'json_schema'
+
+
+def test_groq_video_accepts_empty_findings_without_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = _mock_groq(monkeypatch, lambda _request, _count: _completion('{"findings":[]}'))
+
+    findings, _model = groq_service.analyze_video_frames(_fake_frames(1), [])
+
+    assert findings == []
+    assert len(requests) == 1
+
+
+def test_groq_json_validate_failed_retries_once_and_does_not_log_failed_content(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = 'gsk_SYNTHETIC_FAILED_GENERATION_SECRET'
+    failed_generation = f'```json\n{{"findings":[],"token":"{secret}"}}\n```'
+    requests = _mock_groq(
+        monkeypatch,
+        lambda _request, count: (
+            _json_validate_failed_error(failed_generation)
+            if count == 1
+            else _completion('{"findings":[]}')
+        ),
+    )
+
+    findings, _model = groq_service.analyze_video_frames(_fake_frames(1), [])
+
+    assert findings == []
+    assert len(requests) == 2
+    assert 'markdown_fenced_generation' in caplog.text
+    assert secret not in caplog.text
+
+
+def test_groq_video_repair_failure_raises_without_saving_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = _mock_groq(
+        monkeypatch,
+        lambda _request, _count: _completion('{"findings":[{"timestamp_seconds":"bad"}]}'),
+    )
+
+    with pytest.raises(AIAnalysisError, match='after one format repair'):
+        groq_service.analyze_video_frames(_fake_frames(1), [])
+
+    assert len(requests) == 2
 
 
 def test_groq_video_analysis_batches_twelve_frames_in_groups_of_three(

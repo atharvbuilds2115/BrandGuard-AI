@@ -647,6 +647,44 @@ def test_groq_video_review_saves_only_completed_model_response(
     assert client.get(f"/api/video-reviews/{review['id']}").json() == review
 
 
+def test_groq_video_review_is_not_saved_when_json_repair_also_fails(
+    api: tuple[TestClient, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _identity = api
+    monkeypatch.setattr(video_service, 'extract_video_frames', _fake_frames)
+    monkeypatch.setenv('AI_PROVIDER', 'groq')
+    monkeypatch.setenv('GROQ_API_KEY', 'test-groq-key')
+    requests: list[dict] = []
+
+    class FakeGroq:
+        def __init__(self, **_kwargs: object) -> None:
+            self.chat = SimpleNamespace(completions=self)
+
+        def __enter__(self) -> FakeGroq:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def create(self, **kwargs: dict) -> SimpleNamespace:
+            requests.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content='{"findings":[{"timestamp_seconds":"invalid"}]}'),
+                )],
+            )
+
+    monkeypatch.setattr(groq_service, 'Groq', FakeGroq)
+
+    response = client.post('/api/video-reviews', files={'file': ('launch.mp4', b'video', 'video/mp4')})
+
+    assert response.status_code == 502
+    assert 'no review was saved' in response.json()['detail']
+    assert len(requests) == 2
+    assert client.get('/api/video-reviews').json() == []
+
+
 def test_groq_daily_quota_error_does_not_save_video_review(
     api: tuple[TestClient, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
