@@ -79,7 +79,7 @@ When no provider is configured, the existing rules-only path remains available. 
 
 ### 2. Video Review System
 
-Authenticated users can upload MP4, MOV, M4V, AVI, or WebM videos up to **50 MB** and **180 seconds**. OpenCV samples at most **12** frames, removes byte-identical encoded frames, scales frames to at most **768 pixels** on the longest dimension, and JPEG-encodes at quality 70. Extraction has a 25-second cap and the encoded analysis images have a 6 MB limit.
+Authenticated users can upload MP4, MOV, M4V, AVI, or WebM videos up to **50 MB** and **180 seconds**. OpenCV samples at most **12** frames, with a bundled FFmpeg fallback for unsupported OpenCV codecs or failed seeks. Duplicate encoded frames are removed, frames are scaled to at most **768 pixels** on the longest dimension, and JPEG-encoded at quality 70. Extraction has a 25-second cap and encoded analysis images have a 12 MB limit.
 
 Gemini analyzes frames in a bounded request with retries for transient errors, `Retry-After` handling, and a configured fallback model for eligible availability failures. Groq processes frames in sequential batches of up to three. The saved response records the successful provider/model and Gemini fallback status. Findings carry timestamps, severity, and evidence; risk and compliance scores are derived from finding severities. If extraction or analysis fails, no review is saved and the browser retains the selected file for retry.
 

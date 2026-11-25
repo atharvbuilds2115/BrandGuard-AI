@@ -10,4 +10,5 @@ httpx==0.27.2
 python-dotenv==1.0.1
 firebase-admin==6.5.0
 opencv-python-headless==4.11.0.86
+imageio-ffmpeg==0.6.0
 groq==1.7.0

@@ -117,6 +117,25 @@ def test_video_upload_rejects_files_over_size_limit(
     assert response.json()['detail'] == 'The video exceeds the 50 MB upload limit.'
 
 
+def test_video_decode_failure_is_not_saved(
+    api: tuple[TestClient, dict[str, str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _identity = api
+
+    def fail_extraction(_content: bytes, _filename: str) -> tuple[float, list[dict]]:
+        raise video_service.VideoProcessingError(
+            'This video could not be decoded. It may be corrupted or use an unsupported codec or container.'
+        )
+
+    monkeypatch.setattr(video_service, 'extract_video_frames', fail_extraction)
+
+    response = client.post('/api/video-reviews', files={'file': ('broken.mp4', b'video', 'video/mp4')})
+
+    assert response.status_code == 400
+    assert 'corrupted or use an unsupported codec' in response.json()['detail']
+    assert client.get('/api/video-reviews').json() == []
+
+
 def test_video_review_reports_missing_gemini_configuration(
     api: tuple[TestClient, dict[str, str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -177,8 +196,9 @@ def test_frame_extraction_caps_samples_and_rejects_long_video(
                 return 10.0
             return 1200.0
 
-        def set(self, _prop: int, value: float) -> None:
+        def set(self, _prop: int, value: float) -> bool:
             self.seek = int(value)
+            return True
 
         def read(self) -> tuple[bool, object]:
             self.read_count += 1
@@ -195,11 +215,13 @@ def test_frame_extraction_caps_samples_and_rejects_long_video(
     def fake_resize(_frame: object, size: tuple[int, int]) -> SimpleNamespace:
         return SimpleNamespace(shape=(size[1], size[0], 3))
 
-    def fake_encode(_extension: str, frame: SimpleNamespace, parameters: list[int]) -> tuple[bool, SimpleNamespace]:
+    real_imencode = cv2.imencode
+
+    def fake_encode(_extension: str, frame: SimpleNamespace, parameters: list[int]) -> tuple[bool, np.ndarray]:
         encoded_shapes.append(frame.shape)
         encoded_qualities.append(parameters[1])
-        image_bytes = f'jpeg-frame-{capture.seek}'.encode()
-        return True, SimpleNamespace(nbytes=10, tobytes=lambda: image_bytes)
+        pixels = np.full((8, 8, 3), capture.seek % 256, dtype=np.uint8)
+        return real_imencode('.jpg', pixels)
 
     monkeypatch.setattr(video_service.cv2, 'resize', fake_resize)
     monkeypatch.setattr(video_service.cv2, 'imencode', fake_encode)
@@ -228,8 +250,9 @@ def test_frame_extraction_skips_duplicate_frames(monkeypatch: pytest.MonkeyPatch
         def get(self, prop: int) -> float:
             return 10.0 if prop == video_service.cv2.CAP_PROP_FPS else 300.0
 
-        def set(self, _prop: int, value: float) -> None:
+        def set(self, _prop: int, value: float) -> bool:
             self.seek = int(value)
+            return True
 
         def read(self) -> tuple[bool, object]:
             return True, SimpleNamespace(shape=(360, 640, 3))
@@ -238,11 +261,8 @@ def test_frame_extraction_skips_duplicate_frames(monkeypatch: pytest.MonkeyPatch
             return None
 
     monkeypatch.setattr(video_service.cv2, 'VideoCapture', FakeCapture)
-    monkeypatch.setattr(
-        video_service.cv2,
-        'imencode',
-        lambda *_args: (True, SimpleNamespace(nbytes=10, tobytes=lambda: b'same-frame')),
-    )
+    same_frame = cv2.imencode('.jpg', np.zeros((8, 8, 3), dtype=np.uint8))[1]
+    monkeypatch.setattr(video_service.cv2, 'imencode', lambda *_args: (True, same_frame))
 
     _duration, frames = video_service.extract_video_frames(b'video', 'clip.mp4')
 
@@ -273,6 +293,60 @@ def test_frame_extraction_decodes_a_real_mp4(tmp_path) -> None:
     decoded = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
     assert decoded is not None
     assert max(decoded.shape[:2]) <= video_service.MAX_VIDEO_FRAME_DIMENSION
+
+
+def test_frame_extraction_uses_ffmpeg_for_a_real_mp4_when_opencv_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = tmp_path / 'fallback-sample.mp4'
+    writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*'mp4v'),
+        10.0,
+        (320, 240),
+    )
+    if not writer.isOpened():
+        pytest.skip('OpenCV MP4 encoding is unavailable in this environment.')
+    for frame_index in range(120):
+        frame = np.full((240, 320, 3), frame_index * 2, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+
+    class FailedCapture:
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, prop: int) -> float:
+            return 10.0 if prop == video_service.cv2.CAP_PROP_FPS else 20.0
+
+        def set(self, _prop: int, _value: float) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, None]:
+            return False, None
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr(video_service.cv2, 'VideoCapture', lambda _path: FailedCapture())
+
+    duration, frames = video_service.extract_video_frames(video_path.read_bytes(), video_path.name)
+
+    assert duration == pytest.approx(12.0)
+    assert len(frames) == 2
+    assert frames[-1]['timestamp_seconds'] == pytest.approx(11.0)
+    decoded = cv2.imdecode(
+        np.frombuffer(base64.b64decode(frames[0]['image_base64']), dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert decoded is not None
+    assert decoded.size > 0
+
+
+def test_invalid_video_returns_clear_error(tmp_path) -> None:
+    with pytest.raises(video_service.VideoProcessingError, match='corrupted or unsupported'):
+        video_service.extract_video_frames(b'not a video', 'broken.mp4')
 
 
 def test_video_analysis_retries_timeouts_and_uses_long_timeout(
