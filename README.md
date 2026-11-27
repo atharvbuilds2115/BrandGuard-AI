@@ -57,6 +57,8 @@ BrandGuard combines deterministic checks with optional Gemini or Groq analysis. 
 | **Global Search** | Debounced, case-insensitive partial search across campaign records, uploaded assets, and active guidelines. Results identify their category and navigate to the corresponding existing view. |
 | **Authentication** | Supports Firebase email/password registration and sign-in, Google sign-in, password reset, and an optional dedicated demo account login. Demo login still uses Firebase Authentication. |
 
+Guideline import sends extracted PDF, DOCX, or TXT text to the selected backend AI provider. Groq uses strict JSON Schema output for supported models, validates the response with Pydantic, and makes at most one bounded format-repair retry; only validated rules and source citations reach the review UI. Extracted rules remain unsaved until explicitly approved and saved by a workspace manager.
+
 The application also includes a dedicated evaluator workspace seeding path controlled by backend configuration. Its sample records are labeled as demonstrations; the illustrative video example is not represented as an AI-analyzed review.
 
 ### Typical user journey

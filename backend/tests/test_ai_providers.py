@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 from collections.abc import Callable
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import fitz
+from docx import Document
 from groq import APIStatusError, APITimeoutError
 
 from backend.models import BrandGuideline
 from backend.services import ai_service, gemini_service, groq_service
+from backend.services.guideline_import_service import extract_guideline_document
 from backend.services.ai_provider import (
     AIAnalysisError,
     ai_provider_is_configured,
@@ -109,6 +113,46 @@ def _valid_video_finding() -> dict[str, object]:
         'explanation': 'The logo proportions differ from the supplied guideline.',
         'suggested_correction': 'Use the approved logo asset without stretching.',
     }
+
+
+def _valid_guideline_rule(reference: str = 'Line 1') -> dict[str, object]:
+    return {
+        'rule_name': 'Approved logo color',
+        'category': 'logo_usage',
+        'description': 'Use the approved blue logo.',
+        'rule_value': 'Use the approved blue logo.',
+        'requirement_type': 'required',
+        'severity': 'medium',
+        'source_reference': reference,
+        'source_excerpt': 'Use the approved blue logo.',
+        'manual_review': False,
+    }
+
+
+def _guideline_document(extension: str):
+    source = 'Use the approved blue logo.'
+    if extension == '.pdf':
+        pdf = fitz.open()
+        page = pdf.new_page()
+        page.insert_text((72, 72), source)
+        content = pdf.tobytes()
+        pdf.close()
+        return extract_guideline_document('guide.pdf', 'application/pdf', content), 'Page 1'
+    if extension == '.docx':
+        docx = Document()
+        docx.add_paragraph(source)
+        output = io.BytesIO()
+        docx.save(output)
+        return extract_guideline_document(
+            'guide.docx',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            output.getvalue(),
+        ), 'Paragraph 1'
+    return extract_guideline_document(
+        'guide.txt',
+        'text/plain',
+        source.encode('utf-8'),
+    ), 'Line 1'
 
 
 def _json_validate_failed_error(failed_generation: str = 'malformed output') -> APIStatusError:
@@ -311,6 +355,132 @@ def test_groq_video_accepts_empty_findings_without_repair(
 
     assert findings == []
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    'extension',
+    ['.pdf', '.docx', '.txt'],
+    ids=['pdf', 'docx', 'txt'],
+)
+def test_groq_guideline_extraction_validates_rules_from_supported_files(
+    monkeypatch: pytest.MonkeyPatch,
+    extension: str,
+) -> None:
+    document, reference = _guideline_document(extension)
+    completion = json.dumps({'rules': [_valid_guideline_rule(reference)]})
+    requests = _mock_groq(monkeypatch, lambda _request, _count: _completion(completion))
+
+    rules, provider, model = ai_service.extract_company_guidelines(document, [])
+
+    assert provider == 'groq'
+    assert model == 'qwen/qwen3.8-27b'
+    assert rules[0]['source_reference'] == reference
+    assert rules[0]['source_excerpt'] == 'Use the approved blue logo.'
+    assert requests[0]['response_format']['type'] == 'json_schema'
+    response_schema = requests[0]['response_format']['json_schema']
+    assert response_schema['strict'] is True
+    assert response_schema['schema']['required'] == ['rules']
+    rule_schema = response_schema['schema']['properties']['rules']['items']
+    assert set(rule_schema['required']) == {
+        'rule_name',
+        'category',
+        'description',
+        'rule_value',
+        'requirement_type',
+        'severity',
+        'source_reference',
+        'source_excerpt',
+        'manual_review',
+    }
+    assert rule_schema['additionalProperties'] is False
+    assert 'no Markdown fences' in requests[0]['messages'][0]['content']
+    assert '{"rules":[]}' in requests[0]['messages'][0]['content']
+
+
+def test_groq_guideline_extraction_accepts_empty_rules_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, _reference = _guideline_document('.txt')
+    requests = _mock_groq(monkeypatch, lambda _request, _count: _completion('{"rules":[]}'))
+
+    rules, _provider, _model = ai_service.extract_company_guidelines(document, [])
+
+    assert rules == []
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    'invalid_response',
+    [
+        lambda valid: f'```json\n{valid}\n```',
+        lambda valid: f'Extracted rules:\n{valid}',
+        lambda _valid: '{"rules":[{"rule_name":"Incomplete"}]}',
+        lambda _valid: (
+            '{"rules":[{"rule_name":42,"category":"logo_usage","description":"Description",'
+            '"rule_value":"Value","requirement_type":"required","severity":"medium",'
+            '"source_reference":"Line 1","source_excerpt":"Quote","manual_review":false}]}'
+        ),
+    ],
+    ids=['markdown-fences', 'extra-text', 'missing-fields', 'incorrect-types'],
+)
+def test_groq_guideline_extraction_repairs_malformed_or_invalid_json_once(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_response: Callable[[str], str],
+) -> None:
+    document, reference = _guideline_document('.txt')
+    valid_response = json.dumps({'rules': [_valid_guideline_rule(reference)]})
+    requests = _mock_groq(
+        monkeypatch,
+        lambda _request, count: _completion(
+            invalid_response(valid_response) if count == 1 else valid_response
+        ),
+    )
+
+    rules, _provider, _model = ai_service.extract_company_guidelines(document, [])
+
+    assert len(rules) == 1
+    assert len(requests) == 2
+    repair_prompt = requests[1]['messages'][-1]['content']
+    assert 'Repair the previous response' in repair_prompt
+    assert requests[0]['response_format']['type'] == 'json_schema'
+
+
+def test_groq_guideline_json_validate_failed_retries_once_without_logging_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    document, _reference = _guideline_document('.txt')
+    secret_like_content = 'PRIVATE_DOCUMENT_TEXT_DO_NOT_LOG'
+    requests = _mock_groq(
+        monkeypatch,
+        lambda _request, count: (
+            _json_validate_failed_error(secret_like_content)
+            if count == 1
+            else _completion('{"rules":[]}')
+        ),
+    )
+
+    rules, _provider, _model = ai_service.extract_company_guidelines(document, [])
+
+    assert rules == []
+    assert len(requests) == 2
+    assert 'invalid_json_syntax' in caplog.text
+    assert secret_like_content not in caplog.text
+
+
+def test_groq_guideline_repair_failure_returns_no_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, _reference = _guideline_document('.txt')
+    requests = _mock_groq(
+        monkeypatch,
+        lambda _request, _count: _json_validate_failed_error('invalid guideline JSON'),
+    )
+
+    with pytest.raises(AIAnalysisError, match='company-guideline JSON after one format repair'):
+        ai_service.extract_company_guidelines(document, [])
+
+    assert len(requests) == 2
 
 
 def test_groq_json_validate_failed_retries_once_and_does_not_log_failed_content(
